@@ -1,4 +1,16 @@
+# Local-only: Claude Code files
+CLAUDE.md
+.claude/
+
+# Build output
 __pycache__/
 *.pyc
+build/
+dist/
+
+# Patched apps and signing keys (never publish)
 *.apk
 *.keystore
+
+# macOS
+.DS_Store
