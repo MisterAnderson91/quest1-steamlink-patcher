@@ -3,22 +3,23 @@
 # Copyright (c) 2026 Gregory Anderson
 """Patch Valve's Steam Link VR app so it runs on the original Oculus Quest (Quest 1).
 
-Takes the Steam Link APK from your own SteamVR install, applies three patches,
-signs it with the project's public key (so updates install in place), and
-installs it on the headset over adb:
+Takes the Steam Link APK from your own SteamVR install, patches it, signs it
+with the project's public key (so updates install in place), and installs it
+on the headset over adb. Valve's own code isn't modified:
 
   1. supported devices: the Quest 1 runtime aborts on device names it doesn't
      know ("Unknown device to support: quest3"), so the manifest's
      com.oculus.supportedDevices list is cut down to names it knows.
   2. display 0: the Quest 1 leaves the VR activity on the 2D panel's virtual
-     display, so it never gets the screen. startVRLink() now launches it on
-     display 0.
+     display, so it never gets the screen. Our own small class,
+     com.valvesoftware.steamlink.SteamLinkQ1 (added as classes2.dex; source in
+     payload/), subclasses the 2D activity and launches the VR activity on
+     display 0. The manifest's launcher activity is pointed at it.
   3. Quest 1 identity: SteamVR sees the headset as "Oculus Quest" and the
      controllers as Quest 1 Touch models, instead of "unknown" and Quest 2.
 
-Needs only Python 3.8+. On first run it downloads a Java runtime, apktool,
-apksigner and (if not installed) adb into a cache folder, checking each
-download against a published checksum.
+Needs only Python 3.8+ (standard library). If adb isn't installed, it downloads
+Google's platform-tools into a cache folder, checking the published checksum.
 
 Usage:
     python3 quest1_patcher.py              # find, patch, sign, install
@@ -30,14 +31,12 @@ import base64
 import hashlib
 import json
 import os
-import platform
 import re
 import shutil
 import struct
 import subprocess
 import sys
-import tarfile
-import tempfile
+import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -45,13 +44,6 @@ from pathlib import Path
 PACKAGE = 'com.valvesoftware.steamlinkvr'
 APK_NAME = 'android-steamlinkvr-release.apk'
 STEAMVR_APK = Path('steamapps', 'common', 'SteamVR', 'drivers', 'vrlink', 'resources', APK_NAME)
-
-APKTOOL_URL = 'https://github.com/iBotPeaches/Apktool/releases/download/v3.0.3/apktool_3.0.3.jar'
-APKTOOL_SHA256 = 'dbf930b076c6b9be08d57c449cacefc3bdd6b71ebd59b3066fc0e1f5b14f9423'
-
-# apksigner is a Java program, so the Linux build-tools package works everywhere.
-BUILD_TOOLS_URL = 'https://dl.google.com/android/repository/build-tools_r36.1_linux.zip'
-BUILD_TOOLS_SHA1 = '936a0d6bd5ae3e2118a7567dddbc95ff67ed46e9'
 
 PLATFORM_TOOLS = {
     'linux': ('https://dl.google.com/android/repository/platform-tools_r37.0.1-linux.zip',
@@ -62,12 +54,10 @@ PLATFORM_TOOLS = {
             '6ae73f4de6452dc57e62ec02b68eed92a4c21661'),
 }
 
-JRE_API = ('https://api.adoptium.net/v3/assets/latest/17/hotspot'
-           '?architecture={arch}&image_type=jre&os={os}&vendor=eclipse')
 
 # The project's signing key, deliberately public (same as docs/signing-key.pem):
 # every patched APK, from this script or the web page, is signed with it, so
-# updates install in place from any computer. --keystore signs with your own.
+# updates install in place from any computer. --key-pem signs with your own.
 SIGNING_KEY_PEM = """\
 -----BEGIN PRIVATE KEY-----
 MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCHzUY7RImQ9iBo
@@ -119,6 +109,39 @@ mzszx/aJ1D91
 -----END CERTIFICATE-----
 """
 
+# Our SteamLinkQ1 class (payload/SteamLinkQ1.smali, assembled with smali).
+CLASSES2_DEX = base64.b64decode('''
+ZGV4CjAzOQC22+z0VdzYCdFMVGTDHg2gRJ0lfO4v2ZNkBQAAcAAAAHhWNBIAAAAAAAAAANAEAAAf
+AAAAcAAAAAwAAADsAAAACgAAABwBAAAAAAAAAAAAAAwAAACUAQAAAQAAAPQBAABQAwAAFAIAABQC
+AAAcAgAAHwIAACQCAAAnAgAAKwIAAEoCAABrAgAAhQIAAJoCAACuAgAA1wIAAAIDAAAWAwAAKgMA
+ADcDAABJAwAATAMAAFADAABVAwAAWAMAAFwDAACAAwAAiAMAAJYDAACkAwAApwMAALIDAADGAwAA
+1QMAAAMEAAABAAAABQAAAAYAAAAHAAAACAAAAAkAAAAKAAAACwAAAAwAAAANAAAAEAAAABMAAAAC
+AAAAAAAAACAEAAADAAAAAQAAAAAAAAAEAAAAAQAAABgEAAADAAAAAgAAAAAAAAADAAAABAAAAAAA
+AAADAAAACQAAAAAAAAAQAAAACgAAAAAAAAARAAAACgAAADAEAAASAAAACgAAACgEAAAUAAAACwAA
+ABAEAAABAAEAGgAAAAEAAgAbAAAAAQAEAB4AAAACAAUAFwAAAAMAAwAYAAAABQAAABkAAAAGAAYA
+AAAAAAYABwAcAAAABwAGAAAAAAAHAAcAHAAAAAcACAAcAAAACQAJABYAAAAHAAAAAQAAAAYAAAAA
+AAAADwAAAAAAAADABAAAAAAAAAY8aW5pdD4AAUkAA0lMTAABTAACTEkAHUxhbmRyb2lkL2FwcC9B
+Y3Rpdml0eU9wdGlvbnM7AB9MYW5kcm9pZC9jb250ZW50L0NvbXBvbmVudE5hbWU7ABhMYW5kcm9p
+ZC9jb250ZW50L0ludGVudDsAE0xhbmRyb2lkL29zL0J1bmRsZTsAEkxhbmRyb2lkL3V0aWwvTG9n
+OwAnTGNvbS92YWx2ZXNvZnR3YXJlL3N0ZWFtbGluay9TdGVhbUxpbms7AClMY29tL3ZhbHZlc29m
+dHdhcmUvc3RlYW1saW5rL1N0ZWFtTGlua1ExOwASTGphdmEvbGFuZy9PYmplY3Q7ABJMamF2YS9s
+YW5nL1N0cmluZzsAC1N0ZWFtTGlua1ExABBTdGVhbUxpbmtRMS5qYXZhAAFWAAJWTAADVkxMAAFa
+AAJaTAAiY29tLnZhbHZlc29mdHdhcmUuc3RlYW1saW5rLlZSTGluawAGZXF1YWxzAAxnZXRDbGFz
+c05hbWUADGdldENvbXBvbmVudAABaQAJbWFrZUJhc2ljABJzZXRMYXVuY2hEaXNwbGF5SWQADXN0
+YXJ0QWN0aXZpdHkALHN0YXJ0QWN0aXZpdHk6IGxhdW5jaGluZyBWUkxpbmsgb24gZGlzcGxheSAw
+AAh0b0J1bmRsZQAAAAABAAAACAAAAAEAAAAAAAAAAgAAAAkACQACAAAAAwAEAAEAAAADAAAAAAAA
+AAEAAQABAAAAAAAAAAQAAABwEAYAAAAOAAQAAgADAAAAAAAAAC4AAABuEAQAAwAMADgAJgBuEAMA
+AAAMABoBFQBuIAsAAQAKADgAGgAaAA4AGgEdAHEgBQAQAHEAAAAAAAwAEgFuIAEAEAAMAG4QAgAA
+AAwAbjAKADIADgBvIAcAMgAOAAAAAQEIgYAEvAgJAdQIAAAMAAAAAAAAAAEAAAAAAAAAAQAAAB8A
+AABwAAAAAgAAAAwAAADsAAAAAwAAAAoAAAAcAQAABQAAAAwAAACUAQAABgAAAAEAAAD0AQAAAiAA
+AB8AAAAUAgAAARAAAAUAAAAQBAAAAxAAAAEAAAA4BAAAASAAAAIAAAA8BAAAACAAAAEAAADABAAA
+ABAAAAEAAADQBAAA
+''')
+
+ACTIVITY = 'com.valvesoftware.steamlink.SteamLink'
+ACTIVITY_Q1 = 'com.valvesoftware.steamlink.SteamLinkQ1'
+SIGNATURE_FILE = re.compile(r'^META-INF/[^/]+\.(SF|RSA|DSA|EC|MF)$', re.I)
+
 # Device names the Quest 1 runtime knows (from its libvrapiimpl.so).
 QUEST1_KNOWN_DEVICES = ('quest', 'quest2', 'questpro')
 
@@ -141,15 +164,6 @@ def host_os():
     return 'linux'
 
 
-def host_arch():
-    m = platform.machine().lower()
-    if m in ('x86_64', 'amd64'):
-        return 'x64'
-    if m in ('arm64', 'aarch64'):
-        return 'aarch64'
-    raise PatchError(f'unsupported CPU architecture: {platform.machine()}')
-
-
 def cache_dir():
     """Downloaded tools; safe to delete."""
     if 'QUEST1_PATCHER_CACHE' in os.environ:
@@ -164,7 +178,6 @@ def cache_dir():
 # --- Downloads ----------------------------------------------------------------
 
 def urlopen(url):
-    # Some servers (e.g. api.adoptium.net) reject Python's default user agent.
     return urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': 'quest1-patcher'}))
 
 
@@ -204,54 +217,6 @@ def file_hash(path, algo):
     return h.hexdigest()
 
 
-def find_java():
-    """A Java 17 runtime from Eclipse Temurin, downloaded on first use."""
-    os_name, arch = host_os(), host_arch()
-    root = cache_dir() / 'jre'
-    exe = 'java.exe' if os_name == 'windows' else 'java'
-    for java in root.glob(f'*/**/bin/{exe}'):
-        return java
-    log('Getting a Java runtime (Eclipse Temurin 17)...')
-    with urlopen(JRE_API.format(arch=arch, os=os_name)) as resp:
-        package = json.load(resp)[0]['binary']['package']
-    archive = download(package['link'], cache_dir() / 'downloads' / package['name'],
-                       'sha256', package['checksum'])
-    root.mkdir(parents=True, exist_ok=True)
-    if archive.name.endswith('.zip'):
-        with zipfile.ZipFile(archive) as z:
-            z.extractall(root)
-    else:
-        with tarfile.open(archive) as t:
-            if hasattr(tarfile, 'data_filter'):
-                t.extractall(root, filter='data')
-            else:
-                t.extractall(root)
-    archive.unlink()
-    for java in root.glob(f'*/**/bin/{exe}'):
-        if os_name != 'windows':
-            java.chmod(0o755)
-        return java
-    raise PatchError('downloaded Java runtime has no java executable')
-
-
-def find_apktool():
-    return download(APKTOOL_URL, cache_dir() / 'apktool_3.0.3.jar', 'sha256', APKTOOL_SHA256)
-
-
-def find_apksigner():
-    jar = cache_dir() / 'apksigner.jar'
-    if jar.exists():
-        return jar
-    log('Getting apksigner (Android build-tools)...')
-    archive = download(BUILD_TOOLS_URL, cache_dir() / 'downloads' / 'build-tools.zip',
-                       'sha1', BUILD_TOOLS_SHA1)
-    with zipfile.ZipFile(archive) as z:
-        name = next(n for n in z.namelist() if n.endswith('/lib/apksigner.jar'))
-        jar.write_bytes(z.read(name))
-    archive.unlink()
-    return jar
-
-
 def find_adb():
     """adb from PATH if installed, else Google's platform-tools."""
     found = shutil.which('adb')
@@ -275,13 +240,11 @@ def find_adb():
 
 def run(cmd, **kw):
     cmd = [str(c) for c in cmd]
-    if Path(cmd[0]).stem == 'java':
-        # Don't let the JVM create /tmp/hsperfdata_<user> (it ignores java.io.tmpdir).
-        cmd.insert(1, '-XX:-UsePerfData')
     result = subprocess.run(cmd, capture_output=True, text=True, **kw)
     if result.returncode != 0:
         raise PatchError(f'command failed: {" ".join(cmd)}\n{result.stdout}{result.stderr}')
     return result.stdout
+
 
 
 # --- Finding the APK ----------------------------------------------------------
@@ -401,11 +364,10 @@ def manifest_version(axml):
     return 'unknown'
 
 
-def patch_supported_devices(axml):
-    """Rewrite the com.oculus.supportedDevices list in a binary manifest.
-
-    Works on the manifest's string pool: finds the one '|'-separated list of
-    Quest device names and keeps only names the Quest 1 runtime knows."""
+def patch_manifest(axml):
+    """Edit a binary manifest's string pool: cut the com.oculus.supportedDevices
+    list down to names the Quest 1 runtime knows, and point the launcher
+    activity at our SteamLinkQ1 subclass."""
     file_type, file_hdr, _ = struct.unpack_from('<HHI', axml, 0)
     strings, (pos, ctype, chdr, csize, count, flags, utf8, pool) = read_string_pool(axml)
 
@@ -418,6 +380,12 @@ def patch_supported_devices(axml):
     new = '|'.join(['quest'] + [d for d in kept if d != 'quest'])
     strings[lists[0]] = new
     log(f'  supportedDevices: {old} -> {new}')
+
+    acts = [i for i, s in enumerate(strings) if s == ACTIVITY]
+    if len(acts) != 1:
+        raise PatchError(f'manifest: expected the {ACTIVITY} activity once, found {len(acts)}')
+    strings[acts[0]] = ACTIVITY_Q1
+    log('  launcher activity: SteamLinkQ1 (starts the VR part on display 0)')
 
     data = b''
     offsets = []
@@ -432,53 +400,6 @@ def patch_supported_devices(axml):
     new_pool += struct.pack(f'<{count}I', *offsets) + data
     body = axml[8:pos] + new_pool + axml[pos + csize:]
     return struct.pack('<HHI', file_type, file_hdr, 8 + len(body)) + body
-
-
-LAUNCH_OLD = (
-    '    invoke-virtual {p0, v0}, Lcom/valvesoftware/steamlink/SteamLink;'
-    '->startActivity(Landroid/content/Intent;)V\n'
-)
-
-LAUNCH_NEW = """\
-    const-string v1, "SteamLinkQ1"
-
-    const-string v2, "startVRLink: launching on display 0"
-
-    invoke-static {v1, v2}, Landroid/util/Log;->i(Ljava/lang/String;Ljava/lang/String;)I
-
-    invoke-static {}, Landroid/app/ActivityOptions;->makeBasic()Landroid/app/ActivityOptions;
-
-    move-result-object v1
-
-    const/4 v2, 0x0
-
-    invoke-virtual {v1, v2}, Landroid/app/ActivityOptions;->setLaunchDisplayId(I)Landroid/app/ActivityOptions;
-
-    move-result-object v1
-
-    invoke-virtual {v1}, Landroid/app/ActivityOptions;->toBundle()Landroid/os/Bundle;
-
-    move-result-object v1
-
-    invoke-virtual {p0, v0, v1}, Lcom/valvesoftware/steamlink/SteamLink;->startActivity(Landroid/content/Intent;Landroid/os/Bundle;)V
-"""
-
-
-def patch_launch_display(decoded):
-    """startVRLink(): start the VR activity on display 0, not the 2D panel's
-    virtual display, so the Quest 1 shell hands it the screen."""
-    smali = decoded / 'smali' / 'com' / 'valvesoftware' / 'steamlink' / 'SteamLink.smali'
-    text = smali.read_text(encoding='utf-8')
-    start = text.index('.method public startVRLink(Ljava/lang/String;)V')
-    end = text.index('.end method', start)
-    method = text[start:end]
-    if method.count(LAUNCH_OLD) != 1:
-        raise PatchError('startVRLink(): expected exactly one startActivity(Intent)')
-    if '.locals 4' not in method:
-        raise PatchError('startVRLink(): no longer has .locals 4; registers v1/v2 may not be free')
-    smali.write_text(text[:start] + method.replace(LAUNCH_OLD, LAUNCH_NEW) + text[end:],
-                     encoding='utf-8')
-    log('  startVRLink: launches the VR activity on display 0')
 
 
 HMD_ANCHOR = '    "unknown": {\n'
@@ -510,85 +431,235 @@ CONTROLLER_REPLACEMENTS = [
 ]
 
 
-def patch_device_config(decoded):
-    """Headset and controllers show up in SteamVR as a genuine Oculus Quest.
 
-    hmd_config.json gets a "vr_monterey" (Quest 1) entry with the Quest 2's
-    technical values. The oculus/touch_controller profile gets SteamVR's Quest 1
-    Touch render models and names; input bindings (oculus_touch,
-    touch_profile.json) are unchanged."""
-    config = decoded / 'assets' / 'config'
-    hmd = config / 'hmd_config.json'
-    text = hmd.read_text(encoding='utf-8')
+def patch_hmd_config(data):
+    """hmd_config.json: add a "vr_monterey" (Quest 1) entry with the Quest 2's
+    technical values."""
+    text = data.decode('utf-8')
     if '"vr_monterey"' not in text:
         if text.count(HMD_ANCHOR) != 1:
             raise PatchError('hmd_config.json: expected exactly one "unknown" entry')
         text = text.replace(HMD_ANCHOR, HMD_ENTRY + HMD_ANCHOR)
     json.loads(text)
-    hmd.write_text(text, encoding='utf-8')
+    return text.encode('utf-8')
 
-    controllers = config / 'controller_config.json'
-    text = controllers.read_text(encoding='utf-8')
+
+def patch_controller_config(data):
+    """controller_config.json: the oculus/touch_controller profile gets SteamVR's
+    Quest 1 Touch render models and names; input bindings (oculus_touch,
+    touch_profile.json) are unchanged."""
+    text = data.decode('utf-8')
     for old, new in CONTROLLER_REPLACEMENTS:
         if text.count(old) != 1:
             raise PatchError(f'controller_config.json: expected one {old}')
         text = text.replace(old, new)
     json.loads(text)
-    controllers.write_text(text, encoding='utf-8')
-    log('  headset and controllers: identify as Oculus Quest (Quest 1)')
+    return text.encode('utf-8')
+
+
+# --- Signing (APK v1 / JAR signature, pure Python) ---------------------------------
+# META-INF/MANIFEST.MF, QUEST1.SF and QUEST1.RSA (PKCS #7 detached signature
+# over the .SF, SHA-256 with RSA). v1 is enough for the Quest 1 (Android 10).
+
+def _der_read(buf, pos):
+    """Read one DER TLV at pos: (tag, content_start, end)."""
+    tag = buf[pos]
+    n = buf[pos + 1]
+    pos += 2
+    if n & 0x80:
+        size = n & 0x7F
+        n = int.from_bytes(buf[pos:pos + size], 'big')
+        pos += size
+    return tag, pos, pos + n
+
+
+def _der_children(buf, start, end):
+    out = []
+    while start < end:
+        tag, cstart, cend = _der_read(buf, start)
+        out.append((tag, start, cstart, cend))
+        start = cend
+    return out
+
+
+def _der(tag, content):
+    n = len(content)
+    if n < 0x80:
+        length = bytes([n])
+    else:
+        b = n.to_bytes((n.bit_length() + 7) // 8, 'big')
+        length = bytes([0x80 | len(b)]) + b
+    return bytes([tag]) + length + content
+
+
+def _der_oid(dotted):
+    parts = [int(p) for p in dotted.split('.')]
+    out = bytes([40 * parts[0] + parts[1]])
+    for p in parts[2:]:
+        enc = [p & 0x7F]
+        p >>= 7
+        while p:
+            enc.append(0x80 | (p & 0x7F))
+            p >>= 7
+        out += bytes(reversed(enc))
+    return _der(0x06, out)
+
+
+def _pem_body(pem, label):
+    m = re.search(rf'-----BEGIN {label}-----(.+?)-----END {label}-----', pem, re.S)
+    if not m:
+        raise PatchError(f'no {label} in the PEM')
+    return base64.b64decode(''.join(m.group(1).split()))
+
+
+class SigningKey:
+    """An RSA key (PKCS #8) plus its X.509 certificate, from PEM."""
+
+    def __init__(self, key_pem, cert_pem):
+        der = _pem_body(key_pem, 'PRIVATE KEY')
+        _, s, e = _der_read(der, 0)                       # PrivateKeyInfo
+        octets = _der_children(der, s, e)[2]              # privateKey OCTET STRING
+        _, s, e = _der_read(der, octets[2])               # RSAPrivateKey
+        ints = [int.from_bytes(der[cs:ce], 'big') for _, _, cs, ce in _der_children(der, s, e)]
+        _, self.n, self.e, self.d, self.p, self.q, self.dp, self.dq, self.qinv = ints[:9]
+        self.cert = _pem_body(cert_pem, 'CERTIFICATE')
+        _, s, e = _der_read(self.cert, 0)                 # Certificate
+        _, tbs_start, ts, te = _der_children(self.cert, s, e)[0]
+        fields = _der_children(self.cert, ts, te)         # TBSCertificate
+        if fields[0][0] == 0xA0:                          # [0] version
+            fields = fields[1:]
+        serial, issuer, spki = fields[0], fields[2], fields[5]
+        self.serial_der = self.cert[serial[1]:serial[3]]
+        self.issuer_der = self.cert[issuer[1]:issuer[3]]
+        # SubjectPublicKeyInfo: AlgorithmIdentifier, BIT STRING { RSAPublicKey { n, e } }
+        bits = _der_children(self.cert, spki[2], spki[3])[1]
+        _, s, e = _der_read(self.cert, bits[2] + 1)       # skip the unused-bits byte
+        cert_n = _der_children(self.cert, s, e)[0]
+        if int.from_bytes(self.cert[cert_n[2]:cert_n[3]], 'big') != self.n:
+            raise PatchError("the private key doesn't match the certificate")
+
+    @classmethod
+    def from_pem_text(cls, text):
+        key = re.search(r'-----BEGIN PRIVATE KEY-----.+?-----END PRIVATE KEY-----', text, re.S)
+        cert = re.search(r'-----BEGIN CERTIFICATE-----.+?-----END CERTIFICATE-----', text, re.S)
+        if not key or not cert:
+            raise PatchError('expected a PKCS #8 private key and a certificate in PEM format')
+        return cls(key.group(0), cert.group(0))
+
+    def sign_sha256(self, data):
+        """RSASSA-PKCS1-v1_5 with SHA-256."""
+        k = (self.n.bit_length() + 7) // 8
+        digest_info = bytes.fromhex('3031300d060960864801650304020105000420') + hashlib.sha256(data).digest()
+        em = b'\x00\x01' + b'\xff' * (k - 3 - len(digest_info)) + b'\x00' + digest_info
+        m = int.from_bytes(em, 'big')
+        # CRT: s = m^d mod n
+        s1, s2 = pow(m, self.dp, self.p), pow(m, self.dq, self.q)
+        s = s2 + self.q * ((self.qinv * (s1 - s2)) % self.p)
+        return s.to_bytes(k, 'big')
+
+    def pkcs7_detached(self, content):
+        """PKCS #7 SignedData over content (detached), no signed attributes,
+        as jarsigner writes it."""
+        sha256 = _der(0x30, _der_oid('2.16.840.1.101.3.4.2.1') + b'\x05\x00')
+        rsa = _der(0x30, _der_oid('1.2.840.113549.1.1.1') + b'\x05\x00')
+        signer_info = _der(0x30, _der(0x02, b'\x01')
+                           + _der(0x30, self.issuer_der + self.serial_der)
+                           + sha256 + rsa + _der(0x04, self.sign_sha256(content)))
+        signed_data = _der(0x30, _der(0x02, b'\x01')
+                           + _der(0x31, sha256)
+                           + _der(0x30, _der_oid('1.2.840.113549.1.7.1'))
+                           + _der(0xA0, self.cert)
+                           + _der(0x31, signer_info))
+        return _der(0x30, _der_oid('1.2.840.113549.1.7.2') + _der(0xA0, signed_data))
+
+
+def _manifest_line(text):
+    """Manifest lines are at most 72 bytes including CRLF; longer ones continue
+    on the next line after a single space."""
+    data = text.encode('utf-8')
+    parts, i, width = [], 0, 70
+    while i < len(data):
+        end = min(i + width, len(data))
+        while end < len(data) and (data[end] & 0xC0) == 0x80:   # don't split a UTF-8 character
+            end -= 1
+        parts.append((b' ' if parts else b'') + data[i:end])
+        i, width = end, 69
+    return b'\r\n'.join(parts) + b'\r\n'
+
+
+def sign_and_write(entries, key, out):
+    """Write entries [(name, data, stored)] to out as a v1-signed APK."""
+    created = b'Created-By: 1.0 (quest1-steamlink-patcher)\r\n'
+    b64 = lambda d: base64.b64encode(hashlib.sha256(d).digest())
+    mf = b'Manifest-Version: 1.0\r\n' + created + b'\r\n'
+    sf_entries = b''
+    for name, data, _ in entries:
+        section = _manifest_line('Name: ' + name) + b'SHA-256-Digest: ' + b64(data) + b'\r\n\r\n'
+        mf += section
+        sf_entries += _manifest_line('Name: ' + name) + b'SHA-256-Digest: ' + b64(section) + b'\r\n\r\n'
+    sf = (b'Signature-Version: 1.0\r\n' + created + b'SHA-256-Digest-Manifest: ' + b64(mf)
+          + b'\r\n\r\n' + sf_entries)
+    rsa = key.pkcs7_detached(sf)
+
+    date = (2026, 1, 1, 0, 0, 0)
+    with zipfile.ZipFile(out, 'w') as z:
+        for name, data, stored in [('META-INF/MANIFEST.MF', mf, False), ('META-INF/QUEST1.SF', sf, False),
+                                   ('META-INF/QUEST1.RSA', rsa, False)] + list(entries):
+            info = zipfile.ZipInfo(name, date_time=date)
+            info.compress_type = zipfile.ZIP_STORED if stored else zipfile.ZIP_DEFLATED
+            info.external_attr = 0o644 << 16
+            z.writestr(info, data)
 
 
 # --- Build, sign, install -------------------------------------------------------
 
-def build_patched_apk(src_apk, out_dir, key, keep_work=False):
-    java, apktool, apksigner = find_java(), find_apktool(), find_apksigner()
-    work = Path(tempfile.mkdtemp(prefix='quest1-patcher-'))
+def inspect_apk(apk):
+    """(version, already_patched). An APK already patched and signed by this
+    script or the web page has META-INF/QUEST1.SF and can be installed as is."""
     try:
-        decoded = work / 'decoded'
-        framework = cache_dir() / 'apktool-framework'
-        log('Decoding the APK...')
-        run([java, '-jar', apktool, 'd', '-r', '-f', '-p', framework, '-o', decoded, src_apk])
-        manifest = decoded / 'AndroidManifest.xml'
-        version = manifest_version(manifest.read_bytes())
-        log(f'Steam Link VR {version}. Patching:')
-        manifest.write_bytes(patch_supported_devices(manifest.read_bytes()))
-        patch_launch_display(decoded)
-        patch_device_config(decoded)
-
-        log('Rebuilding...')
-        unsigned = work / 'unsigned.apk'
-        run([java, '-jar', apktool, 'b', '-p', framework, '-o', unsigned, decoded])
-
-        log('Signing...')
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out = out_dir / f'steamlinkvr-{version}-quest1.apk'
-        # The web page recognises already-patched APKs by META-INF/QUEST1.SF.
-        run([java, '-jar', apksigner, 'sign', *signer_args(key, java, work), '--v1-signer-name', 'QUEST1',
-             '--v1-signing-enabled', 'true', '--v2-signing-enabled', 'true',
-             '--out', out, unsigned])
-        run([java, '-jar', apksigner, 'verify', out])
-        log(f'Wrote {out}')
-        return out
-    finally:
-        if keep_work:
-            log(f'Work folder kept: {work}')
-        else:
-            shutil.rmtree(work, ignore_errors=True)
+        with zipfile.ZipFile(apk) as z:
+            names = z.namelist()
+            if 'AndroidManifest.xml' not in names:
+                raise PatchError('not an APK: no AndroidManifest.xml')
+            return manifest_version(z.read('AndroidManifest.xml')), 'META-INF/QUEST1.SF' in names
+    except zipfile.BadZipFile as e:
+        raise PatchError(f'not a valid APK (zip): {e}')
 
 
-def signer_args(key, java, work):
-    """apksigner options for --keystore (key = (path, alias, password)), or
-    for the built-in project key."""
-    if key:
-        keystore, alias, password = key
-        return ['--ks', keystore, '--ks-key-alias', alias,
-                '--ks-pass', f'pass:{password}', '--key-pass', f'pass:{password}']
-    # apksigner wants the key as unencrypted PKCS #8 DER.
-    body = ''.join(l for l in SIGNING_KEY_PEM.splitlines() if not l.startswith('-----'))
-    key_file, cert_file = work / 'signing-key.pk8', work / 'signing-cert.pem'
-    key_file.write_bytes(base64.b64decode(body))
-    cert_file.write_text(SIGNING_CERT_PEM)
-    return ['--key', key_file, '--cert', cert_file]
+def build_patched_apk(src_apk, out_dir, key):
+    version, _ = inspect_apk(src_apk)
+    log(f'Steam Link VR {version}. Patching:')
+    entries = []
+    with zipfile.ZipFile(src_apk) as z:
+        names = z.namelist()
+        if 'classes.dex' not in names:
+            raise PatchError('not an APK: no classes.dex')
+        if 'classes2.dex' in names:
+            raise PatchError('this APK already has classes2.dex; is it already patched?')
+        patches = {
+            'AndroidManifest.xml': patch_manifest,
+            'assets/config/hmd_config.json': patch_hmd_config,
+            'assets/config/controller_config.json': patch_controller_config,
+        }
+        for missing in set(patches) - set(names):
+            raise PatchError(f'{missing} not found in the APK')
+        for info in z.infolist():
+            name = info.filename
+            if SIGNATURE_FILE.match(name) or name.endswith('/'):
+                continue
+            data = z.read(name)
+            if name in patches:
+                data = patches[name](data)
+            entries.append((name, data, info.compress_type == zipfile.ZIP_STORED))
+    entries.append(('classes2.dex', CLASSES2_DEX, False))
+    log('  headset and controllers: identify as Oculus Quest (Quest 1)')
+
+    log('Signing...')
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f'steamlinkvr-{version}-quest1.apk'
+    sign_and_write(entries, key, out)
+    log(f'Wrote {out}')
+    return out
 
 
 def adb_devices(adb):
@@ -655,22 +726,26 @@ def main():
                    help='headset on adb over Wi-Fi (after `adb tcpip 5555`); implies --serial')
     p.add_argument('--yes', action='store_true', help="don't ask before uninstalling an old build")
     p.add_argument('--force-device', action='store_true', help='install even if the device is not a Quest 1')
-    p.add_argument('--keep-work', action='store_true', help='keep the temporary work folder')
-    p.add_argument('--keystore', type=Path,
-                   help="sign with your own keystore instead of the project's public key "
-                        '(updates then need the same keystore to install in place)')
-    p.add_argument('--key-alias', default='quest1', help='key alias in --keystore')
-    p.add_argument('--key-pass', default='', help='password of --keystore and its key')
+    p.add_argument('--key-pem', type=Path,
+                   help="sign with your own key (a PEM file with a PKCS #8 private key and its "
+                        "certificate) instead of the project's public key")
     args = p.parse_args()
-    key = (args.keystore, args.key_alias, args.key_pass) if args.keystore else None
 
     try:
+        key = (SigningKey.from_pem_text(args.key_pem.read_text()) if args.key_pem
+               else SigningKey(SIGNING_KEY_PEM, SIGNING_CERT_PEM))
         apk = args.apk or find_steamvr_apk()
         if not apk:
             raise PatchError("couldn't find SteamVR's Steam Link APK. Install SteamVR, or pass "
                              f'--apk (it is SteamVR/drivers/vrlink/resources/{APK_NAME}).')
+        apk = Path(apk)
         log(f'Using {apk}')
-        out = build_patched_apk(Path(apk), args.output_dir, key, args.keep_work)
+        version, already = inspect_apk(apk)
+        if already:
+            log(f'Steam Link VR {version} is already patched and signed; installing it as it is.')
+            out = apk
+        else:
+            out = build_patched_apk(apk, args.output_dir, key)
         if args.no_install:
             return 0
         adb = find_adb()

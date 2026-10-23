@@ -34,9 +34,10 @@ on Linux/SteamOS and Windows.
   Horizon phone app, under the headset's settings).
 - A PC with **SteamVR** installed, running Linux/SteamOS or Windows.
 - **Python 3.8 or newer.** On Windows, get it from python.org or the
-  Microsoft Store.
+  Microsoft Store. Nothing else: no Java, no Android SDK.
 - A USB cable for the headset.
-- About 200 MB of disk space for the tools the script downloads.
+- adb, if you have it. If not, the script downloads Google's platform-tools
+  (about 10 MB) the first time it installs.
 
 ## Use
 1. Plug the headset into your PC and put it on. If it asks to **allow USB
@@ -51,7 +52,8 @@ on Linux/SteamOS and Windows.
 4. Start SteamVR on your PC, then connect from the headset.
 
 After a SteamVR update, run the script again. SteamVR can ship a newer Steam
-Link, which needs patching again.
+Link, which needs patching again. Give it an APK that's already patched (by the
+script or the web page) and it just installs it.
 
 ### Options
 - `--no-install`: only build the patched APK (saved in the current folder).
@@ -60,26 +62,25 @@ Link, which needs patching again.
   computer). In SteamVR it's at
   `SteamVR/drivers/vrlink/resources/android-steamlinkvr-release.apk`.
 - `--connect HOST:PORT`: install over adb on Wi-Fi instead of USB.
-- `--keystore`, `--key-alias`, `--key-pass`: sign with your own key instead
-  of the project's.
+- `--key-pem FILE`: sign with your own key instead of the project's (a PEM
+  file holding a PKCS #8 private key and its certificate).
 - `--help` lists everything.
 
 ## What it does
 1. Finds `android-steamlinkvr-release.apk` in your SteamVR install.
-2. Downloads its tools into a cache folder, checking each against a
-   published checksum: a Java runtime (Eclipse Temurin 17), apktool,
-   apksigner (Android build-tools) and, if you don't have it, adb.
-3. Applies three patches:
+2. Applies three patches. Valve's own code isn't modified; everything else
+   in the app is copied unchanged:
    - **Supported devices:** the Quest 1 crashes on device names it doesn't
      know ("Unknown device to support: quest3"), so the app's device list is
      cut down to names it knows.
    - **Display 0:** the Quest 1 leaves the VR part of the app on the 2D
-     window's hidden screen, so the stream never shows. The app now opens it
-     on the main display.
+     window's hidden screen, so the stream never shows. A small extra class of
+     ours ([payload/SteamLinkQ1.smali](payload/SteamLinkQ1.smali), added as
+     `classes2.dex`) opens it on the main display instead.
    - **Quest 1 identity:** the headset and controllers identify as an Oculus
      Quest, so SteamVR shows the right controller models.
-4. Signs the app with the project's public key (see [Signing](#signing)), and
-   installs it with adb.
+3. Signs the app with the project's public key (see [Signing](#signing)), and
+   installs it with adb, downloading adb first if you don't have it.
 
 ## Signing
 Every patched APK, from the script or the web page, is signed with the same
@@ -89,13 +90,13 @@ pairing, whichever computer or browser made it.
 
 The trade-off: anyone can sign an app with this key, and Android would accept
 it as an update to Steam Link. Only install Steam Link builds you patched
-yourself. If you'd rather use your own key, pass `--keystore` to the script.
+yourself. If you'd rather use your own key, pass `--key-pem` to the script.
 
 Switching from a build signed with a different key needs one uninstall (the
 script and page offer it), and then pairing with your PC again.
 
 ## Removing it
-- The downloaded tools: delete the cache folder.
+- adb, if the script downloaded it: delete the cache folder.
   - Linux: `~/.cache/quest1-patcher/`
   - Windows: `%LOCALAPPDATA%\quest1-patcher\`
 - The app on the headset: `adb uninstall com.valvesoftware.steamlinkvr`, or
