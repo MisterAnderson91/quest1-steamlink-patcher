@@ -19,6 +19,24 @@ Tested with Steam Link VR 2.0.20 and 2.0.24, streaming from SteamOS
 > [open an issue](../../issues) with how it went, whether it worked or not,
 > and include the script's output.
 
+## Before you start (web page or script)
+1. **Turn on developer mode** for the headset. You need a Meta developer
+   account that belongs to a verified developer organization; then, in the
+   Meta Horizon phone app, signed in with that account: headset icon → your
+   headset → **Headset Settings** → **Developer Mode** → on. Full steps:
+   [Meta's guide](https://developers.meta.com/horizon/documentation/android-apps/enable-developer-mode/).
+2. Use a **data** USB-C cable. Charge-only cables don't work.
+3. **Windows only:** install Meta's
+   [Oculus ADB Drivers](https://developers.meta.com/horizon/downloads/package/oculus-adb-drivers/):
+   unzip, then right-click `android_winusb.inf` → Install.
+4. The first time a computer (or browser) connects, the headset asks to
+   **allow USB debugging**. Put it on, tick "Always allow from this
+   computer" and accept.
+
+Meta no longer supports the Quest 1. If the Developer Mode switch doesn't
+appear for yours in today's Horizon app, please
+[open an issue](../../issues) so we can document it.
+
 ## Easiest: the web page
 **https://misteranderson91.github.io/quest1-steamlink-patcher/**
 
@@ -30,12 +48,12 @@ The rest of this README covers the command-line script, which does the same
 on Linux/SteamOS and Windows.
 
 ## What you need
-- An original Oculus Quest with **developer mode** on (enable it in the Meta
-  Horizon phone app, under the headset's settings).
+- An original Oculus Quest with **developer mode** on (see
+  [Before you start](#before-you-start-web-page-or-script)).
 - A PC with **SteamVR** installed, running Linux/SteamOS or Windows.
 - **Python 3.8 or newer.** On Windows, get it from python.org or the
   Microsoft Store. Nothing else: no Java, no Android SDK.
-- A USB cable for the headset.
+- A USB-C data cable for the headset.
 - adb, if you have it. If not, the script downloads Google's platform-tools
   (about 10 MB) the first time it installs.
 

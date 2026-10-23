@@ -68,6 +68,24 @@
   </div>
 
   <div class="card">
+    <h2>Before you start</h2>
+    <ul>
+      <li><strong>Turn on developer mode</strong> for the headset. You need a Meta developer account in a
+        verified developer organization; then, in the Meta Horizon phone app: headset icon → your headset →
+        <strong>Headset Settings</strong> → <strong>Developer Mode</strong> → on. Full steps:
+        <a href="https://developers.meta.com/horizon/documentation/android-apps/enable-developer-mode/">Meta's
+        guide</a>.</li>
+      <li>Use a <strong>data</strong> USB-C cable; charge-only cables don't work.</li>
+      <li><strong>Windows only:</strong> install Meta's
+        <a href="https://developers.meta.com/horizon/downloads/package/oculus-adb-drivers/">Oculus ADB
+        Drivers</a> (unzip, then right-click <code>android_winusb.inf</code> → Install).</li>
+    </ul>
+    <p class="muted">Meta no longer supports the Quest 1. If the Developer Mode switch doesn't appear for
+      yours in today's Horizon app, please
+      <a href="https://github.com/MisterAnderson91/quest1-steamlink-patcher/issues">open an issue</a>.</p>
+  </div>
+
+  <div class="card">
     <h2><span class="step">1</span>Choose the Steam Link app from SteamVR</h2>
     <p>Pick <code>android-steamlinkvr-release.apk</code> from your SteamVR folder.</p>
     <div id="paths-mine"></div>
@@ -94,8 +112,8 @@
 
   <div class="card">
     <h2><span class="step">3</span>Install on the headset</h2>
-    <p>Turn on developer mode for the headset in the Meta Horizon phone app, plug it into this computer
-      with USB, and put it on.</p>
+    <p>With developer mode on (see <em>Before you start</em>), plug the headset into this computer with
+      USB and put it on.</p>
     <button id="install" disabled>Connect and install</button>
     <button id="download" class="secondary" disabled>Download the patched APK</button>
     <ul class="muted">
