@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>USB Diagnostics</title>
+<style>
+  :root { --bg: #f6f7f9; --text: #1d2228; --code: #eef1f4; --accent: #1a6fd1; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #14171b; --text: #e6e9ec; --code: #262b31; --accent: #4c95ea; } }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px; }
+  button { font: inherit; padding: 8px 16px; border-radius: 8px; border: 0; background: var(--accent); color: #fff; }
+  pre { background: var(--code); padding: 10px; border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<main>
+<h1>Headset USB diagnostics</h1>
+<p>Connects to the headset's adb over WebUSB without any library and logs each step. Close adb and
+  SideQuest first. Copy the log into a GitHub issue if asked.</p>
+<button id="go">Run</button>
+<pre id="log"></pre>
+</main>
+<script type="module">
+const out = document.getElementById('log');
+const log = (s) => { out.textContent += s + '\n'; };
+const hex = (n, w = 2) => '0x' + n.toString(16).padStart(w, '0');
+
+// adb message: command, arg0, arg1, data length, data crc32 (sum of bytes on old adb), magic
+function message(cmd, arg0, arg1, data) {
+  const c = [...cmd].reduce((v, ch, i) => v | (ch.charCodeAt(0) << (8 * i)), 0) >>> 0;
+  const h = new DataView(new ArrayBuffer(24));
+  const sum = data.reduce((a, b) => a + b, 0) >>> 0;
+  [c, arg0, arg1, data.length, sum, (c ^ 0xffffffff) >>> 0].forEach((v, i) => h.setUint32(i * 4, v, true));
+  return [new Uint8Array(h.buffer), data];
+}
+
+function withTimeout(p, ms, what) {
+  return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(`${what}: no reply after ${ms / 1000} s`)), ms))]);
+}
+
+document.getElementById('go').onclick = async () => {
+  out.textContent = '';
+  try {
+    log(`browser: ${navigator.userAgent}`);
+    const dev = await navigator.usb.requestDevice({ filters: [{ classCode: 0xff, subclassCode: 0x42, protocolCode: 1 }] });
+    log(`device: ${dev.manufacturerName} ${dev.productName} ${dev.serialNumber} vid=${hex(dev.vendorId, 4)} pid=${hex(dev.productId, 4)}`);
+    await dev.open();
+    log('opened');
+    if (dev.configuration === null) await dev.selectConfiguration(1);
+    let adbIf = null, inEp = null, outEp = null;
+    for (const cfg of dev.configurations) {
+      log(`config ${cfg.configurationValue}${cfg === dev.configuration ? ' (active)' : ''}`);
+      for (const itf of cfg.interfaces) {
+        for (const alt of itf.alternates) {
+          const eps = alt.endpoints.map((e) => `${e.direction}#${e.endpointNumber}/${e.type}/${e.packetSize}`).join(', ');
+          log(`  interface ${itf.interfaceNumber} alt ${alt.alternateSetting}: class ${hex(alt.interfaceClass)} sub ${hex(alt.interfaceSubclass)} proto ${hex(alt.interfaceProtocol)} ${alt.interfaceName || ''} [${eps}]`);
+          if (cfg === dev.configuration && alt.interfaceClass === 0xff && alt.interfaceSubclass === 0x42 && alt.interfaceProtocol === 1) {
+            adbIf = itf; inEp = alt.endpoints.find((e) => e.direction === 'in'); outEp = alt.endpoints.find((e) => e.direction === 'out');
+          }
+        }
+      }
+    }
+    if (!adbIf) throw new Error('no adb interface in the active configuration');
+    log(`adb interface ${adbIf.interfaceNumber}: in ep ${inEp.endpointNumber}, out ep ${outEp.endpointNumber}, claimed=${adbIf.claimed}`);
+    await dev.claimInterface(adbIf.interfaceNumber);
+    log('claimed');
+    const banner = new TextEncoder().encode('host::features=shell_v2,cmd,stat_v2\0');
+    const [hdr, data] = message('CNXN', 0x01000001, 256 * 1024, banner);
+    let r = await dev.transferOut(outEp.endpointNumber, hdr);
+    log(`sent CNXN header: ${r.status} ${r.bytesWritten} bytes`);
+    r = await dev.transferOut(outEp.endpointNumber, data);
+    log(`sent CNXN banner: ${r.status} ${r.bytesWritten} bytes`);
+    for (let i = 0; i < 2; i++) {
+      const res = await withTimeout(dev.transferIn(inEp.endpointNumber, 64 * 1024), 10000, 'waiting for the headset');
+      const b = new Uint8Array(res.data.buffer);
+      const cmd = String.fromCharCode(...b.subarray(0, 4));
+      log(`received ${res.status} ${b.length} bytes: ${b.length === 24 ? cmd + ' arg0=' + new DataView(res.data.buffer).getUint32(4, true) : '(payload)'}`);
+      if (cmd === 'AUTH') log('-> the headset answered with AUTH: the USB link works; a real adb client would now sign or send its key (prompt).');
+      if (cmd === 'CNXN') log('-> the headset accepted the connection without asking.');
+    }
+    await dev.releaseInterface(adbIf.interfaceNumber);
+    await dev.close();
+    log('done');
+  } catch (e) {
+    log(`ERROR: ${e.name}: ${e.message}`);
+  }
+};
+
+</script>
+</body>
+</html>

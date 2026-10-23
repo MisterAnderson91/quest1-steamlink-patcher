@@ -1,9 +1,9 @@
 # Steam Link VR apk for the original Oculus Quest
 
 Valve's Steam Link VR app doesn't run on the original Oculus Quest
-(Quest 1). This script takes the copy of the app that comes with **your own
+(Quest 1). This project takes the copy of the app that comes with **your own
 SteamVR install**, patches it to work on the Quest 1, and installs it on your
-headset.
+headset, from a web page or a script.
 
 What you get:
 - PC VR streaming from SteamVR to a Quest 1 over Wi-Fi with Steam Link.
@@ -18,6 +18,16 @@ Tested with Steam Link VR 2.0.20 and 2.0.24, streaming from SteamOS
 > SteamVR, please give it a go and
 > [open an issue](../../issues) with how it went, whether it worked or not,
 > and include the script's output.
+
+## Easiest: the web page
+**https://misteranderson91.github.io/quest1-steamlink-patcher/**
+
+Patches and installs from Chrome, Edge or another Chromium browser, with
+nothing to install: choose the APK from your SteamVR folder, patch, plug the
+headset in and install. Everything happens in your browser.
+
+The rest of this README covers the command-line script, which does the same
+on Linux/SteamOS and Windows.
 
 ## What you need
 - An original Oculus Quest with **developer mode** on (enable it in the Meta
@@ -50,7 +60,8 @@ Link, which needs patching again.
   computer). In SteamVR it's at
   `SteamVR/drivers/vrlink/resources/android-steamlinkvr-release.apk`.
 - `--connect HOST:PORT`: install over adb on Wi-Fi instead of USB.
-- `--keystore`, `--key-alias`, `--key-pass`: sign with an existing key.
+- `--keystore`, `--key-alias`, `--key-pass`: sign with your own key instead
+  of the project's.
 - `--help` lists everything.
 
 ## What it does
@@ -67,17 +78,21 @@ Link, which needs patching again.
      on the main display.
    - **Quest 1 identity:** the headset and controllers identify as an Oculus
      Quest, so SteamVR shows the right controller models.
-4. Signs the app with a key created on your computer, and installs it with
-   adb.
+4. Signs the app with the project's public key (see [Signing](#signing)), and
+   installs it with adb.
 
-## Your signing key
-The first run creates a signing key:
-- Linux: `~/.local/share/quest1-patcher/`
-- Windows: `%APPDATA%\quest1-patcher\`
+## Signing
+Every patched APK, from the script or the web page, is signed with the same
+key, which is deliberately public ([docs/signing-key.pem](docs/signing-key.pem)).
+That way an update always installs over the existing app and keeps your
+pairing, whichever computer or browser made it.
 
-**Keep it.** Updates must be signed with the same key to install over the
-existing app. With a different key, the old app has to be uninstalled first
-(the script asks), and you'll need to pair with your PC again.
+The trade-off: anyone can sign an app with this key, and Android would accept
+it as an update to Steam Link. Only install Steam Link builds you patched
+yourself. If you'd rather use your own key, pass `--keystore` to the script.
+
+Switching from a build signed with a different key needs one uninstall (the
+script and page offer it), and then pairing with your PC again.
 
 ## Removing it
 - The downloaded tools: delete the cache folder.

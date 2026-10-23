@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quest 1 Steam Link Patcher</title>
+<meta name="description" content="Patch Valve's Steam Link VR app to run on the original Oculus Quest, in your browser.">
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1d2228; --muted: #5d6670; --border: #dde1e6;
+    --accent: #1a6fd1; --accent-text: #ffffff; --ok: #1f8a4c; --err: #c0392b; --code: #eef1f4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171b; --card: #1d2126; --text: #e6e9ec; --muted: #9aa3ad; --border: #2e343b;
+      --accent: #4c95ea; --accent-text: #0b1220; --ok: #4cc27f; --err: #ff6b5b; --code: #262b31;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 1.7rem; margin: 0 0 4px; }
+  h2 { font-size: 1.15rem; margin: 0 0 8px; }
+  p { margin: 8px 0; }
+  .lead { color: var(--muted); margin-bottom: 24px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+          padding: 18px 20px; margin: 16px 0; }
+  .step { display: inline-block; width: 1.7em; height: 1.7em; line-height: 1.7em; text-align: center;
+          border-radius: 50%; background: var(--accent); color: var(--accent-text); font-weight: 600;
+          margin-right: 8px; font-size: 0.9rem; }
+  code { background: var(--code); padding: 1px 5px; border-radius: 4px; font-size: 0.9em;
+         overflow-wrap: anywhere; }
+  ul { padding-left: 20px; margin: 8px 0; }
+  button, .button { font: inherit; padding: 8px 16px; border-radius: 8px; border: 1px solid var(--accent);
+           background: var(--accent); color: var(--accent-text); cursor: pointer; text-decoration: none;
+           display: inline-block; margin: 4px 8px 4px 0; }
+  button.secondary { background: transparent; color: var(--accent); }
+  button:disabled { opacity: 0.45; cursor: default; }
+  .file-row { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; margin-top: 8px; }
+  .path { margin: 10px 0; }
+  .path-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .path-row code { flex: 1 1 320px; }
+  button.small { padding: 4px 10px; font-size: 0.85rem; margin: 0; }
+  details { margin: 8px 0; }
+  #apk-name { color: var(--muted); overflow-wrap: anywhere; }
+  #log { background: var(--code); border-radius: 8px; padding: 10px 12px; min-height: 3em;
+         font: 0.85rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+         white-space: pre-wrap; overflow-wrap: anywhere; }
+  .ok { color: var(--ok); } .err { color: var(--err); }
+  .muted { color: var(--muted); font-size: 0.92rem; }
+  details summary { cursor: pointer; color: var(--accent); }
+  footer { color: var(--muted); font-size: 0.85rem; margin-top: 32px; }
+  footer a, .card a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Steam Link VR for the original Oculus Quest</h1>
+  <p class="lead">Valve's Steam Link VR app doesn't run on the Quest 1. This page patches the copy that
+    comes with <strong>your own SteamVR install</strong> and installs it on your headset. Everything
+    happens in your browser; nothing is uploaded.</p>
+
+  <div class="card" id="browser-warning" hidden>
+    <p class="err"><strong>This browser can't talk to the headset over USB.</strong> Use Chrome, Edge,
+      Brave or another Chromium browser on a computer. You can still patch the app here and install the
+      download with SideQuest.</p>
+  </div>
+
+  <div class="card">
+    <h2><span class="step">1</span>Choose the Steam Link app from SteamVR</h2>
+    <p>Pick <code>android-steamlinkvr-release.apk</code> from your SteamVR folder.</p>
+    <div id="paths-mine"></div>
+    <details id="paths-other-box">
+      <summary>Other platforms</summary>
+      <div id="paths-other"></div>
+    </details>
+    <p class="muted">If SteamVR is in another Steam library folder, look under that library's
+      <code>steamapps/common/SteamVR</code>. The file picker remembers the folder for next time.</p>
+    <p class="muted">Already have an APK patched by this page or the script? Choose it to install it again
+      without patching.</p>
+    <div class="file-row">
+      <button id="choose">Choose APK</button>
+      <input type="file" id="apk" accept=".apk" hidden>
+      <span id="apk-name">No file chosen</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2><span class="step">2</span>Patch</h2>
+    <button id="patch" disabled>Patch the app</button>
+    <div id="log"></div>
+  </div>
+
+  <div class="card">
+    <h2><span class="step">3</span>Install on the headset</h2>
+    <p>Turn on developer mode for the headset in the Meta Horizon phone app, plug it into this computer
+      with USB, and put it on.</p>
+    <button id="install" disabled>Connect and install</button>
+    <button id="download" class="secondary" disabled>Download the patched APK</button>
+    <ul class="muted">
+      <li>Close SideQuest and any other adb first (run <code>adb kill-server</code>); only one program can
+        talk to the headset at a time.</li>
+      <li>The headset will ask to allow USB debugging from this browser. Tick "Always allow".</li>
+      <li>If it also asks to allow access to files, answer that first if you can. Answering it makes the
+        headset reconnect briefly; the page waits for it and carries on.</li>
+      <li>Linux: if the headset doesn't show up in the list, your user may need permission for USB
+        devices (a udev rule for Oculus, vendor ID <code>2833</code>).</li>
+      <li>Then open <strong>Steam Link</strong> from <strong>Unknown Sources</strong> on the headset, pair
+        with your PC, start SteamVR and connect.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>What it changes</h2>
+    <ul>
+      <li><strong>Supported devices:</strong> the Quest 1 crashes on device names it doesn't know
+        ("quest3"), so the app's device list is cut down to names it knows.</li>
+      <li><strong>Display 0:</strong> on the Quest 1 the VR part of the app opens on the 2D window's hidden
+        screen and never shows. A small extra class (ours) opens it on the main display instead.</li>
+      <li><strong>Quest 1 identity:</strong> SteamVR sees an "Oculus Quest" with Quest 1 Touch
+        controllers.</li>
+    </ul>
+    <p class="muted">Valve's own code isn't modified. After a SteamVR update, patch the new app again;
+      it installs over the old one and keeps your pairing.</p>
+    <p class="muted">Every patched app is signed with the same, deliberately public key
+      (<a href="signing-key.pem">signing-key.pem</a>), so updates install in place from any computer. The
+      trade-off: anyone could sign an app with it, so only install Steam Link builds you made yourself.</p>
+    <details>
+      <summary>Known issues</summary>
+      <ul>
+        <li>Wired (USB) streaming doesn't work on the Quest 1; stream over Wi-Fi.</li>
+        <li>A minimized 2D window sometimes won't come back (a Quest 1 system bug). Reboot the headset,
+          or run <code>adb shell am force-stop com.oculus.vrshell</code>.</li>
+      </ul>
+    </details>
+  </div>
+
+  <footer>
+    <p>Not affiliated with Valve or Meta. Steam Link and SteamVR are Valve's; this page doesn't include or
+      redistribute Valve's app. Source, a command-line version and issues:
+      <a href="https://github.com/MisterAnderson91/quest1-steamlink-patcher">GitHub</a>. MIT licensed.</p>
+  </footer>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/node-forge@1.4.0/dist/forge.min.js"></script>
+<script type="module">
+import { patchApk, inspectApk } from './apkpatch.js';
+import { signApk, loadProjectKey } from './apksign.js';
+
+const $ = (id) => document.getElementById(id);
+const logEl = $('log');
+let patched = null; // { name, bytes }
+
+function log(msg, cls) {
+  const line = document.createElement('div');
+  line.textContent = msg;
+  if (cls) line.className = cls;
+  logEl.append(line);
+}
+
+// --- Where the APK is, per platform ----------------------------------------------
+
+const RESOURCES = 'steamapps/common/SteamVR/drivers/vrlink/resources';
+const PATHS = [
+  { os: 'windows', label: 'Windows', path: `C:\\Program Files (x86)\\Steam\\${RESOURCES.replaceAll('/', '\\')}\\`,
+    tip: 'In the file picker, paste it into the "File name" box and press Enter.' },
+  { os: 'linux', label: 'Linux / SteamOS', path: `~/.local/share/Steam/${RESOURCES}/`,
+    tip: 'In the file picker, press Ctrl+L, paste it and press Enter.' },
+  { os: 'linux', label: 'Linux, Flatpak Steam', path: `~/.var/app/com.valvesoftware.Steam/.local/share/Steam/${RESOURCES}/`,
+    tip: 'In the file picker, press Ctrl+L, paste it and press Enter.' },
+  { os: 'mac', label: 'macOS', path: null,
+    tip: "SteamVR doesn't run on macOS. Copy the APK over from your gaming PC (its folder is listed under "
+      + '"Other platforms"), then choose it here.' },
+];
+
+function detectOs() {
+  const p = (navigator.userAgentData?.platform || navigator.platform || '').toLowerCase();
+  if (p.includes('win')) return 'windows';
+  if (p.includes('mac')) return 'mac';
+  if (p.includes('linux') || p.includes('x11') || p.includes('cros')) return 'linux';
+  return null;
+}
+
+function pathBlock({ label, path, tip }) {
+  const div = document.createElement('div');
+  div.className = 'path';
+  const title = document.createElement('div');
+  title.innerHTML = `<strong></strong>`;
+  title.firstChild.textContent = label;
+  div.append(title);
+  if (path) {
+    const row = document.createElement('div');
+    row.className = 'path-row';
+    const code = document.createElement('code');
+    code.textContent = path;
+    const copy = document.createElement('button');
+    copy.className = 'secondary small';
+    copy.textContent = 'Copy path';
+    copy.onclick = async () => {
+      await navigator.clipboard.writeText(path);
+      copy.textContent = 'Copied';
+      setTimeout(() => { copy.textContent = 'Copy path'; }, 1500);
+    };
+    row.append(code, copy);
+    div.append(row);
+  }
+  const t = document.createElement('div');
+  t.className = 'muted';
+  t.textContent = tip;
+  div.append(t);
+  return div;
+}
+
+const myOs = detectOs();
+for (const p of PATHS) $(p.os === myOs ? 'paths-mine' : 'paths-other').append(pathBlock(p));
+if (!myOs || myOs === 'mac') $('paths-other-box').open = true;
+
+// Chrome's newer picker remembers the last folder per id, so after the first
+// time it opens straight in SteamVR's folder.
+$('choose').addEventListener('click', async () => {
+  if (!window.showOpenFilePicker) { $('apk').click(); return; }
+  try {
+    const [handle] = await window.showOpenFilePicker({
+      id: 'steamlink-apk',
+      types: [{ description: 'Android app', accept: { 'application/vnd.android.package-archive': ['.apk'] } }],
+    });
+    chooseFile(await handle.getFile());
+  } catch (e) {
+    if (e.name !== 'AbortError') log(`Error: ${e.message}`, 'err');
+  }
+});
+
+$('apk').addEventListener('change', () => chooseFile($('apk').files[0]));
+
+let chosenFile = null;
+
+async function chooseFile(file) {
+  chosenFile = file || null;
+  logEl.textContent = '';
+  patched = null;
+  $('patch').disabled = $('install').disabled = $('download').disabled = true;
+  $('apk-name').textContent = file ? file.name : 'No file chosen';
+  if (!file) return;
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const info = inspectApk(bytes);
+    if (info.patched) {
+      patched = { name: file.name, bytes };
+      log(`This is Steam Link VR ${info.version}, already patched and signed. You can install it as it is.`, 'ok');
+      $('install').disabled = !navigator.usb;
+      $('download').disabled = false;
+    } else {
+      log(`Steam Link VR ${info.version}. Ready to patch.`);
+      $('patch').disabled = false;
+    }
+  } catch (e) {
+    log(`Error: ${e.message}`, 'err');
+  }
+}
+
+$('patch').addEventListener('click', async () => {
+  logEl.textContent = '';
+  $('patch').disabled = $('install').disabled = $('download').disabled = true;
+  try {
+    const apk = new Uint8Array(await chosenFile.arrayBuffer());
+    const dex = new Uint8Array(await (await fetch('classes2.dex')).arrayBuffer());
+    const { version, entries } = patchApk(apk, dex, log);
+    log('Signing...');
+    const bytes = await signApk(entries, await loadProjectKey());
+    patched = { name: `steamlinkvr-${version}-quest1.apk`, bytes };
+    log(`Done: ${patched.name}`, 'ok');
+    $('install').disabled = !navigator.usb;
+    $('download').disabled = false;
+  } catch (e) {
+    log(`Error: ${e.message}`, 'err');
+    console.error(e);
+  } finally {
+    $('patch').disabled = false;
+  }
+});
+
+$('download').addEventListener('click', () => {
+  const url = URL.createObjectURL(new Blob([patched.bytes], { type: 'application/vnd.android.package-archive' }));
+  const a = Object.assign(document.createElement('a'), { href: url, download: patched.name });
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+});
+
+$('install').addEventListener('click', async () => {
+  $('install').disabled = true;
+  let adb;
+  try {
+    const { connectHeadset, installApk } = await import('./adb.js');
+    adb = await connectHeadset(log);
+    await installApk(adb, patched.bytes, (m) => log(m, m.startsWith('Installed') ? 'ok' : ''),
+      async (msg) => window.confirm(msg));
+  } catch (e) {
+    log(`Error: ${e.message}`, 'err');
+    console.error(e);
+  } finally {
+    if (adb) await adb.close().catch(() => {});
+    $('install').disabled = false;
+  }
+});
+
+if (!navigator.usb) $('browser-warning').hidden = false;
+</script>
+</body>
+</html>

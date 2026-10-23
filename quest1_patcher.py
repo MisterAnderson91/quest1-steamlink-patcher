@@ -4,8 +4,8 @@
 """Patch Valve's Steam Link VR app so it runs on the original Oculus Quest (Quest 1).
 
 Takes the Steam Link APK from your own SteamVR install, applies three patches,
-signs it with a key generated on your computer, and installs it on the headset
-over adb:
+signs it with the project's public key (so updates install in place), and
+installs it on the headset over adb:
 
   1. supported devices: the Quest 1 runtime aborts on device names it doesn't
      know ("Unknown device to support: quest3"), so the manifest's
@@ -26,6 +26,7 @@ Usage:
     python3 quest1_patcher.py --apk PATH   # use a specific Steam Link APK
 """
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -64,8 +65,59 @@ PLATFORM_TOOLS = {
 JRE_API = ('https://api.adoptium.net/v3/assets/latest/17/hotspot'
            '?architecture={arch}&image_type=jre&os={os}&vendor=eclipse')
 
-KEY_ALIAS = 'quest1'
-KEY_PASS = 'quest1patcher'  # protects nothing secret; the key only signs sideloads
+# The project's signing key, deliberately public (same as docs/signing-key.pem):
+# every patched APK, from this script or the web page, is signed with it, so
+# updates install in place from any computer. --keystore signs with your own.
+SIGNING_KEY_PEM = """\
+-----BEGIN PRIVATE KEY-----
+MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCHzUY7RImQ9iBo
+nC5x+BNzgm3KnWaUxBr2sNJvBWEtm7cMZA6guJea/7IKD2YcxFFkhCORslGyLOQr
+eD+mq3eJSHVi4NjDAtmzLTwcFGk8JQ0i8TkMI19LGVPtgBsa4rCBQwCKXEyogBCR
+mL+lGSNFug+jyYIw4m/R+RJJlUbkzaUgoaQj1It7QXJav2UZp9eOC1YP39LfXFiY
+CcUQGUbPHu9oWiWflBYPUcnHs7sbEfGk2t5cCl5Tteg1qSZvFbmVA26uInuxfV9X
+rycuxC/Agb0I9a/Hk41ncd4AVqNXtK9W2CTs604ZA5vYVJk6U9tO+l7QtQDSgjHg
+TN1g5SHdAgMBAAECggEAU44OjzrNNX7qU9L8lKzhMunmKYsM6a17NZt37k0uDITJ
+bHtHsMXCqeB3J89vsXVs6t6Oj/9aWrlaLhDPgPnxE2ucphjX5aykS6UiXdiFIzdc
+zMoEop5E7I0J4ZA3nSQrG20hMQA3PlmFWD/Wcnt0A1vGcazzSKaZzGRmRxXsx6uC
+ZBGRVLN6n8Le8J7k3DzW0SPiT2sX8fGPUpGhxEerW5q53lTY/YQDZ5d4CAl42O6u
+T5tSYpU0SoP5Bgmt8M5BSADdhKINpGwzEWRfdEJ4zBXwGgaLPWB3jukQAagTPQ8O
+1RCMf6F4u2FufNvw2/ZHw224HrzaipFozlATiE2yYQKBgQDgqQo2BiUCduPWkw7k
+3LeOwMPuICjLUj0sNZmyw/T1TAFiOodsAVC41l5brd6nTciZ2VovMmWZOouy4J3b
+pQeMp2aEazR9U/oOts5ssEOlLPfs5znWPYJwh3r5ZaXU6IJFdLf8X+vYaxSiZNty
+f0oYXaDK+vy6BNi6aiImdhPuVQKBgQCavvbZXQjY3rIKz1c6c7Em+DeiBN9q90G3
+FAF8skisbj8iHrPHgCasuuxIpyIGVWtGf8idjUiEa085cJSYqoa8xrG8UZ+UIp+D
+Tn5umO0PUyayBRwOif+2GWKBKnNrz/GC3WMVSz6GlKh8Og8VtDS84a88ynHUSeAR
+2hPfbRXdaQKBgDbitV7rc2E9wH3soYfiMGoMyBFGBBFgPxes5Kba3t6Kug/QcsM9
+MwZlQNovCSVgiHClvDWpn06nEfgajhZaJBUF1LLnKgSwXnf3y0ica3pQGSXke6nO
+jy6EutNxNOlmAGWNlWFv4cOWrYzbDQ3U8TowrZbJaLLdekFYqo0w7b+dAoGACUW+
+FuI7QHt/oaQw7uC10cb31m6CUK+GMYkyWZ15O1PT1qCOVzr3lkwREn1pTYXayrun
+csFfggfIFIIJdWhqcG9bgRRHAqJceoq+irQBKHTsEai6uKhOOUQmIeVAS0qHhzbq
+1ADRO1E3E1KLStqkeljvni3nSjgvBALURAQOVlkCgYAS2PgdthOxlTFWbXRUwerv
+SkgN1Hi4n9rrBl3KzheSypJahXQhboFZqeXo9o/PwBpuRxM0YdAFDVbEyOqgYWBH
+TpJL7ElprZp4CvKpgPmYEWQidcw8UWseiwIY/90UBUi3x0CjGeTvbis5mvJadZtI
+CYuG4qv1jmGP/kcEn+soug==
+-----END PRIVATE KEY-----
+"""
+SIGNING_CERT_PEM = """\
+-----BEGIN CERTIFICATE-----
+MIIC1TCCAb2gAwIBAgIEIs+I1DANBgkqhkiG9w0BAQsFADAaMRgwFgYDVQQDEw9R
+dWVzdDEgU2lkZWxvYWQwIBcNMjYxMDIxMDk0MTU5WhgPMjA1NDAzMDgwOTQxNTla
+MBoxGDAWBgNVBAMTD1F1ZXN0MSBTaWRlbG9hZDCCASIwDQYJKoZIhvcNAQEBBQAD
+ggEPADCCAQoCggEBAIfNRjtEiZD2IGicLnH4E3OCbcqdZpTEGvaw0m8FYS2btwxk
+DqC4l5r/sgoPZhzEUWSEI5GyUbIs5Ct4P6ard4lIdWLg2MMC2bMtPBwUaTwlDSLx
+OQwjX0sZU+2AGxrisIFDAIpcTKiAEJGYv6UZI0W6D6PJgjDib9H5EkmVRuTNpSCh
+pCPUi3tBclq/ZRmn144LVg/f0t9cWJgJxRAZRs8e72haJZ+UFg9RycezuxsR8aTa
+3lwKXlO16DWpJm8VuZUDbq4ie7F9X1evJy7EL8CBvQj1r8eTjWdx3gBWo1e0r1bY
+JOzrThkDm9hUmTpT2076XtC1ANKCMeBM3WDlId0CAwEAAaMhMB8wHQYDVR0OBBYE
+FAg/LHBLAsn3WiUjOe8vHBp4JNZ7MA0GCSqGSIb3DQEBCwUAA4IBAQBGHjq0e/Kk
+P8BYCPrKO0yMn/CTI0GaFgbQEb6zrIp3W5yQR0xV7NmCdg6iYzu+CenCKvibv1pe
+ljJcAhMb9ZF4HqXITAGq0zMQfEnTMIjmzS/cJWI7D6wrQ/v3jeyxoc/+sPcZbC4Y
+tiPhufZZYWk5/RvsrtOQBT7eCPjJQm4eO2AMokq+nITm/V4k4ogDuKdxYsURQA+p
+L9madHXx/+OMZWWUsg0uhoFsmr4XB0+/dCrsbf7LCg1nvcz65qOJ5Cf78YVTn9U0
+A0Q6zIYwGRh6Hv1ynfTJ3CTd1IZztwUEToiqXWQPa1ybYMQ9SFcskDjFvHUZzfAN
+mzszx/aJ1D91
+-----END CERTIFICATE-----
+"""
 
 # Device names the Quest 1 runtime knows (from its libvrapiimpl.so).
 QUEST1_KNOWN_DEVICES = ('quest', 'quest2', 'questpro')
@@ -107,18 +159,6 @@ def cache_dir():
     if host_os() == 'mac':
         return Path.home() / 'Library' / 'Caches' / 'quest1-patcher'
     return Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache')) / 'quest1-patcher'
-
-
-def data_dir():
-    """The signing key. Keep it: updates signed with a different key can't
-    install over the old app without uninstalling it (and re-pairing)."""
-    if 'QUEST1_PATCHER_DATA' in os.environ:
-        return Path(os.environ['QUEST1_PATCHER_DATA'])
-    if host_os() == 'windows':
-        return Path(os.environ.get('APPDATA', Path.home())) / 'quest1-patcher'
-    if host_os() == 'mac':
-        return Path.home() / 'Library' / 'Application Support' / 'quest1-patcher'
-    return Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local' / 'share')) / 'quest1-patcher'
 
 
 # --- Downloads ----------------------------------------------------------------
@@ -520,11 +560,10 @@ def build_patched_apk(src_apk, out_dir, key, keep_work=False):
         run([java, '-jar', apktool, 'b', '-p', framework, '-o', unsigned, decoded])
 
         log('Signing...')
-        keystore, alias, password = key if key else (signing_key(java), KEY_ALIAS, KEY_PASS)
         out_dir.mkdir(parents=True, exist_ok=True)
         out = out_dir / f'steamlinkvr-{version}-quest1.apk'
-        run([java, '-jar', apksigner, 'sign', '--ks', keystore, '--ks-key-alias', alias,
-             '--ks-pass', f'pass:{password}', '--key-pass', f'pass:{password}',
+        # The web page recognises already-patched APKs by META-INF/QUEST1.SF.
+        run([java, '-jar', apksigner, 'sign', *signer_args(key, java, work), '--v1-signer-name', 'QUEST1',
              '--v1-signing-enabled', 'true', '--v2-signing-enabled', 'true',
              '--out', out, unsigned])
         run([java, '-jar', apksigner, 'verify', out])
@@ -537,19 +576,19 @@ def build_patched_apk(src_apk, out_dir, key, keep_work=False):
             shutil.rmtree(work, ignore_errors=True)
 
 
-def signing_key(java):
-    keystore = data_dir() / 'quest1-patcher.keystore'
-    if keystore.exists():
-        return keystore
-    keytool = java.parent / ('keytool.exe' if host_os() == 'windows' else 'keytool')
-    keystore.parent.mkdir(parents=True, exist_ok=True)
-    run([keytool, '-genkeypair', '-keystore', keystore, '-storetype', 'PKCS12',
-         '-alias', KEY_ALIAS, '-keyalg', 'RSA', '-keysize', '2048', '-validity', '10000',
-         '-storepass', KEY_PASS, '-keypass', KEY_PASS,
-         '-dname', 'CN=Quest 1 Steam Link patcher (local key)'])
-    log(f'  created your signing key: {keystore}')
-    log('  Keep it: future updates must be signed with the same key to install in place.')
-    return keystore
+def signer_args(key, java, work):
+    """apksigner options for --keystore (key = (path, alias, password)), or
+    for the built-in project key."""
+    if key:
+        keystore, alias, password = key
+        return ['--ks', keystore, '--ks-key-alias', alias,
+                '--ks-pass', f'pass:{password}', '--key-pass', f'pass:{password}']
+    # apksigner wants the key as unencrypted PKCS #8 DER.
+    body = ''.join(l for l in SIGNING_KEY_PEM.splitlines() if not l.startswith('-----'))
+    key_file, cert_file = work / 'signing-key.pk8', work / 'signing-cert.pem'
+    key_file.write_bytes(base64.b64decode(body))
+    cert_file.write_text(SIGNING_CERT_PEM)
+    return ['--key', key_file, '--cert', cert_file]
 
 
 def adb_devices(adb):
@@ -618,10 +657,10 @@ def main():
     p.add_argument('--force-device', action='store_true', help='install even if the device is not a Quest 1')
     p.add_argument('--keep-work', action='store_true', help='keep the temporary work folder')
     p.add_argument('--keystore', type=Path,
-                   help='sign with this existing keystore instead of your generated key '
-                        '(e.g. to update an older patched build in place)')
-    p.add_argument('--key-alias', default=KEY_ALIAS, help='key alias in --keystore')
-    p.add_argument('--key-pass', default=KEY_PASS, help='password of --keystore and its key')
+                   help="sign with your own keystore instead of the project's public key "
+                        '(updates then need the same keystore to install in place)')
+    p.add_argument('--key-alias', default='quest1', help='key alias in --keystore')
+    p.add_argument('--key-pass', default='', help='password of --keystore and its key')
     args = p.parse_args()
     key = (args.keystore, args.key_alias, args.key_pass) if args.keystore else None
 
