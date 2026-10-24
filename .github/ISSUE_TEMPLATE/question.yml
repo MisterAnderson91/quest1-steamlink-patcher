@@ -1,0 +1,10 @@
+name: Question or idea
+description: Ask something, or suggest an improvement.
+labels: ["question"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question or idea
+    validations:
+      required: true

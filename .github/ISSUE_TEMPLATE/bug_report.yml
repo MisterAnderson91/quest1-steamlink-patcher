@@ -1,0 +1,77 @@
+name: Bug report
+description: Something didn't work when patching, installing or streaming.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Please check the README's "Before you start" and
+        "Known issues" sections first.
+  - type: dropdown
+    id: tool
+    attributes:
+      label: Which did you use?
+      options:
+        - The web page
+        - The Python script
+    validations:
+      required: true
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Where did it go wrong?
+      options:
+        - Choosing or finding the APK
+        - Patching or signing
+        - Connecting to the headset / installing
+        - Steam Link on the headset (opening, pairing, connecting)
+        - Streaming (quality, stutter, controllers, etc.)
+        - Something else
+    validations:
+      required: true
+  - type: input
+    id: computer
+    attributes:
+      label: Computer OS
+      description: e.g. Windows 11, SteamOS 3.8, Fedora 43, macOS 26
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Browser (web page only)
+      description: e.g. Chrome 155, Edge, Brave
+  - type: input
+    id: steamlink
+    attributes:
+      label: Steam Link VR version
+      description: Shown in the log, e.g. "Steam Link VR 2.0.24"
+  - type: input
+    id: firmware
+    attributes:
+      label: Headset firmware
+      description: Settings → About on the headset, e.g. 50.0.0.198…
+  - type: dropdown
+    id: modified
+    attributes:
+      label: Is the headset modified?
+      options:
+        - No, stock
+        - Rooted / bootloader unlocked
+        - Rooted with the 90 Hz mod
+        - Other (please describe below)
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: The web page's log, or the script's full output. Please don't include anything private.
+      render: text
