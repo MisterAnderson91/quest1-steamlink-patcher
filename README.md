@@ -10,14 +10,13 @@ What you get:
 - SteamVR sees the headset as an "Oculus Quest" and shows genuine Quest 1
   Touch controllers.
 
-Tested with Steam Link VR 2.0.20 and 2.0.24, streaming from SteamOS
-(Steam Machine) to a Quest 1 on its final firmware.
+Tested with Steam Link VR 2.0.20 and 2.0.24 on a Quest 1 on its final
+firmware (V50), streaming from SteamOS. Community members have it working
+too, including the script on Windows 11 and with a 90 Hz mod.
 
-> **Windows testers wanted.** The script is written to support Windows, but
-> nobody has tried it there yet. If you have a Quest 1 and a Windows PC with
-> SteamVR, please give it a go and
-> [open an issue](../../issues) with how it went, whether it worked or not,
-> and include the script's output.
+Found a problem, or got it working on a setup not mentioned here?
+[Open an issue](../../issues) and include the script's output or the web
+page's log.
 
 ## Before you start (web page or script)
 1. **Turn on developer mode** for the headset. You need a Meta developer
