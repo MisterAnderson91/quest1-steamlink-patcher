@@ -165,8 +165,8 @@
 
 <script src="https://cdn.jsdelivr.net/npm/node-forge@1.4.0/dist/forge.min.js"></script>
 <script type="module">
-import { patchApk, inspectApk } from './apkpatch.js';
-import { signApk, loadProjectKey } from './apksign.js';
+import { patchApk, inspectApk } from './apkpatch.js?v=14d5f6a321';
+import { signApk, loadProjectKey } from './apksign.js?v=bb2b4c2e08';
 
 const $ = (id) => document.getElementById(id);
 const logEl = $('log');
@@ -284,7 +284,7 @@ $('patch').addEventListener('click', async () => {
   $('patch').disabled = $('install').disabled = $('download').disabled = true;
   try {
     const apk = new Uint8Array(await chosenFile.arrayBuffer());
-    const dex = new Uint8Array(await (await fetch('classes2.dex')).arrayBuffer());
+    const dex = new Uint8Array(await (await fetch('classes2.dex?v=98239a3dc7')).arrayBuffer());
     const { version, entries } = patchApk(apk, dex, log);
     log('Signing...');
     const bytes = await signApk(entries, await loadProjectKey());
@@ -311,7 +311,7 @@ $('install').addEventListener('click', async () => {
   $('install').disabled = true;
   let adb;
   try {
-    const { connectHeadset, installApk } = await import('./adb.js');
+    const { connectHeadset, installApk } = await import('./adb.js?v=9d6b88750a');
     adb = await connectHeadset(log);
     await installApk(adb, patched.bytes, (m) => log(m, m.startsWith('Installed') ? 'ok' : ''),
       async (msg) => window.confirm(msg));

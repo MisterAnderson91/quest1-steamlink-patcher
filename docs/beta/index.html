@@ -154,7 +154,7 @@
         <code>10.86.13.38</code>. Remove it any time in the Magisk app (Modules), then restart.</li>
     </ul>
     <button id="module-install">Copy to headset and install</button>
-    <a class="button secondary" href="q1_steamlink_usb.zip" download>Download module</a>
+    <a class="button secondary" href="q1_steamlink_usb.zip?v=8277b119eb" download>Download module</a>
     <div id="module-log" class="log"></div>
   </div>
 
@@ -165,8 +165,15 @@
       (takes a few seconds), then open Steam Link again.</p>
     <button id="fix-window">Connect and fix the window</button>
     <div id="fix-window-status" class="log"></div>
+    <p><strong>Stuck on "Connecting", or a black screen with loading dots:</strong> SteamVR on the PC
+      may be stuck from an earlier session. Quit SteamVR on the PC and connect again; if it won't quit,
+      restart the PC (on Linux, <code>pkill -9 vrserver</code> also works).</p>
     <p><strong>Anything else:</strong> make the problem happen, then save the headset's log straight away,
-      before restarting the headset (a restart clears it). Attach the file to an issue.</p>
+      before restarting the headset (a restart clears it). Attach the file to an issue. It includes the
+      firmware, the Steam Link version and which patch it has, the wired-streaming module's state and Steam
+      Link's connection log. On rooted headsets adb briefly restarts as root to check the module, then
+      switches back. Saving also makes the headset keep a longer log until it restarts, so if the start of
+      the problem is missing, make it happen again and save again.</p>
     <p class="muted">The log can include your network names and addresses; look through it before posting it
       publicly.</p>
     <button id="save-log">Connect and save log</button>
@@ -182,11 +189,13 @@
         screen and never shows. A small extra class added to the app opens it on the main display instead.</li>
       <li><strong>Quest 1 identity:</strong> SteamVR sees an "Oculus Quest" with Quest 1 Touch
         controllers.</li>
-      <li><strong>Wired streaming:</strong> if the headset has the USB network from the module above, the
-        stream starts on the cable. Without it, nothing changes.</li>
+      <li><strong>In-VR panels:</strong> the warnings, loading and error panels inside VR are small web
+        pages, and the Quest 1's built-in browser is too old for their scripts, so they showed up blank with
+        buttons that didn't work. Their scripts are rewritten to work on it, and a 5-byte fix in the app's
+        native library stops it crashing when a panel button is used.</li>
     </ul>
-    <p class="muted">Valve's own code isn't modified. After a SteamVR update, patch the new app again;
-      it installs over the old one and keeps your pairing.</p>
+    <p class="muted">Apart from those panel fixes, Valve's own code isn't modified. After a SteamVR update,
+      patch the new app again; it installs over the old one and keeps your pairing.</p>
     <p class="muted">Every patched app is signed with the same, deliberately public key
       (<a href="signing-key.pem">signing-key.pem</a>), so updates install in place from any computer. The
       trade-off: anyone could sign an app with it, so only install Steam Link builds you made yourself.</p>
@@ -212,8 +221,8 @@
 
 <script src="https://cdn.jsdelivr.net/npm/node-forge@1.4.0/dist/forge.min.js"></script>
 <script type="module">
-import { patchApk, inspectApk } from './apkpatch.js';
-import { signApk, loadProjectKey } from './apksign.js';
+import { patchApk, inspectApk } from './apkpatch.js?v=47258bfd9b';
+import { signApk, loadProjectKey } from './apksign.js?v=bb2b4c2e08';
 
 const $ = (id) => document.getElementById(id);
 const logEl = $('log');
@@ -331,7 +340,7 @@ $('patch').addEventListener('click', async () => {
   $('patch').disabled = $('install').disabled = $('download').disabled = true;
   try {
     const apk = new Uint8Array(await chosenFile.arrayBuffer());
-    const dex = new Uint8Array(await (await fetch('classes2.dex')).arrayBuffer());
+    const dex = new Uint8Array(await (await fetch('classes2.dex?v=98239a3dc7')).arrayBuffer());
     const { version, entries } = patchApk(apk, dex, log);
     log('Signing...');
     const bytes = await signApk(entries, await loadProjectKey());
@@ -358,7 +367,7 @@ $('install').addEventListener('click', async () => {
   $('install').disabled = true;
   let adb;
   try {
-    const { connectHeadset, installApk } = await import('./adb.js');
+    const { connectHeadset, installApk } = await import('./adb.js?v=3a77c6700e');
     adb = await connectHeadset(log);
     await installApk(adb, patched.bytes, (m) => log(m, m.startsWith('Installed') ? 'ok' : ''),
       async (msg) => window.confirm(msg));
@@ -382,8 +391,8 @@ $('module-install').addEventListener('click', async () => {
   $('module-install').disabled = true;
   let adb;
   try {
-    const zip = new Uint8Array(await (await fetch('q1_steamlink_usb.zip')).arrayBuffer());
-    const { connectHeadset, installMagiskModule } = await import('./adb.js');
+    const zip = new Uint8Array(await (await fetch('q1_steamlink_usb.zip?v=8277b119eb')).arrayBuffer());
+    const { connectHeadset, installMagiskModule } = await import('./adb.js?v=3a77c6700e');
     adb = await connectHeadset(mlog);
     const ok = await installMagiskModule(adb, zip, (m) => mlog(m, m.startsWith('Installed') ? 'ok' : ''));
     if (!ok) mlog('Not installed: the module needs root and Magisk. With Magisk set up, you can also '
@@ -408,7 +417,7 @@ $('fix-window').addEventListener('click', async () => {
   $('fix-window').disabled = true;
   let adb;
   try {
-    const { connectHeadset, fixStuckWindow } = await import('./adb.js');
+    const { connectHeadset, fixStuckWindow } = await import('./adb.js?v=3a77c6700e');
     adb = await connectHeadset(flog);
     await fixStuckWindow(adb, flog);
     flog('Done. Wait a few seconds for the menu to come back, then open Steam Link again.', 'ok');
@@ -432,7 +441,7 @@ $('save-log').addEventListener('click', async () => {
   $('save-log').disabled = true;
   let adb;
   try {
-    const { connectHeadset, headsetLog } = await import('./adb.js');
+    const { connectHeadset, headsetLog } = await import('./adb.js?v=3a77c6700e');
     adb = await connectHeadset(slog);
     const text = await headsetLog(adb, slog);
     const name = `quest1-log-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')}.txt`;

@@ -212,6 +212,100 @@ function patchControllerConfig(bytes) {
   return utf8.encode(text);
 }
 
+// The in-VR panels (preflight warnings, loading, dashboard) are web pages shown
+// in the system WebView. The Quest 1's is Chrome 74, which can't parse optional
+// chaining (Chrome 80+), so every script, including the shared ipc.js that
+// fills in the text and handles laser clicks, fails to load: blank panels with
+// dead buttons. Rewrite each `x?.y` as `(x == null ? {} : x).y`.
+const WEBUI_JS = /^assets\/webui\/.+\.js$/;
+const OPTIONAL_CHAIN = /(?<=[\w$)\]])\?\.(?!\d)/;
+
+function receiverStart(text, end) {
+  let i = end;
+  while (i > 0) {
+    const c = text[i - 1];
+    if (c === ')' || c === ']') {
+      let depth = 0;
+      while (i > 0) {
+        i--;
+        if (text[i] === ')' || text[i] === ']') depth++;
+        else if (text[i] === '(' || text[i] === '[') {
+          depth--;
+          if (depth === 0) break;
+        }
+      }
+      if (depth) throw new PatchError('webui: unbalanced brackets before ?.');
+    } else if (/[\w$.]/.test(c)) {
+      i--;
+    } else {
+      break;
+    }
+  }
+  return i;
+}
+
+// The scripts send messages back to libvrlink_scene.so, whose WebView thread
+// reads them off its Looper queue by poking at the WebView's own classes:
+// newer WebViews (obfuscated z5/U4/Z5) have the encoded message in a byte[]
+// field "a"; otherwise it expects msg.obj to be a Pair whose first has a String
+// field "b". On Chrome 74, Pair.first is the encoded byte[] itself, so that
+// lookup aborts the app (JNI "fid == null") as soon as the page sends anything,
+// e.g. a haptic when the laser touches a button. Patch the Pair branch to hand
+// Pair.first straight to the byte[] decoder.
+const WEBVIEW_LIB = 'lib/arm64-v8a/libvrlink_scene.so';
+const WEBVIEW_PAIR_BRANCH = hex(
+  '605e40f9' +   // ldr x0, [x19, #0xb8]     env
+  'e10319aa' +   // mov x1, x25              msg.obj (the Pair)
+  '620a40f9' +   // ldr x2, [x19, #0x10]     Pair.first field id
+  '080040f9087d41f900013fd6' +  // env->GetObjectField
+  'f90300aa' +   // mov x25, x0              -> mov x26, x0
+  '605e40f9');   // ldr x0, [x19, #0xb8]     -> b <byte[] decoder>
+const WEBVIEW_BYTES_DECODER = hex(
+  '605e40f9' +   // ldr x0, [x19, #0xb8]
+  'e1031aaa' +   // mov x1, x26              the byte[]
+  '080040f908ad42f900013fd6');  // env->GetArrayLength
+
+function hex(s) {
+  return Uint8Array.from(s.match(/../g), (b) => parseInt(b, 16));
+}
+
+function findAll(data, pattern) {
+  const found = [];
+  for (let i = data.indexOf(pattern[0]); i >= 0 && i <= data.length - pattern.length; i = data.indexOf(pattern[0], i + 1)) {
+    let j = 1;
+    while (j < pattern.length && data[i + j] === pattern[j]) j++;
+    if (j === pattern.length) found.push(i);
+  }
+  return found;
+}
+
+/** Returns the patched library, or null if Valve's code has changed. */
+function patchWebviewLib(data) {
+  const pair = findAll(data, WEBVIEW_PAIR_BRANCH);
+  const dec = findAll(data, WEBVIEW_BYTES_DECODER);
+  if (pair.length !== 1 || dec.length !== 1) return null;
+  const distance = dec[0] - (pair[0] + 28);
+  if (!(distance > 0 && distance < 1 << 27)) return null;
+  const out = data.slice();
+  const view = new DataView(out.buffer);
+  view.setUint32(pair[0] + 24, 0xaa0003fa, true);                  // mov x26, x0
+  view.setUint32(pair[0] + 28, 0x14000000 | (distance / 4), true); // b decoder
+  return out;
+}
+
+function patchWebuiJs(bytes) {
+  let text = fromUtf8.decode(bytes);
+  for (let m; (m = OPTIONAL_CHAIN.exec(text));) {
+    const after = m.index + 2;
+    if (text[after] === '(') throw new PatchError('webui: optional call x?.() is not supported');
+    const start = receiverStart(text, m.index);
+    const recv = text.slice(start, m.index);
+    const dot = text[after] === '[' ? '' : '.';
+    text = `${text.slice(0, start)}(${recv} == null ? {} : ${recv})${dot}${text.slice(after)}`;
+  }
+  return utf8.encode(text);
+}
+
 // --- APK ---------------------------------------------------------------------
 
 /**
@@ -260,6 +354,16 @@ export function patchApk(apkBytes, classes2Dex, log = () => {}) {
     'assets/config/controller_config.json': patchControllerConfig(files['assets/config/controller_config.json'] || new Uint8Array()),
   };
   log('headset and controllers: identify as Oculus Quest (Quest 1)');
+  const webviewLib = files[WEBVIEW_LIB] && patchWebviewLib(files[WEBVIEW_LIB]);
+  if (webviewLib) {
+    patched[WEBVIEW_LIB] = webviewLib;
+    for (const name of Object.keys(files)) {
+      if (WEBUI_JS.test(name)) patched[name] = patchWebuiJs(files[name]);
+    }
+    log('in-VR panels: made to work with the Quest 1 WebView');
+  } else {
+    log('in-VR panels: NOT patched (unknown libvrlink_scene.so); they stay blank');
+  }
 
   const entries = [];
   for (const name of Object.keys(files)) {

@@ -226,10 +226,19 @@ class AdbUsb {
    * Returns true if adbd is now root; false if this headset doesn't allow it.
    */
   async restartAsRoot(log) {
+    return this.restartAdbd('root:', /already running as root/i, 'Restarting adb on the headset as root...', log);
+  }
+
+  /** Undo restartAsRoot ("adb unroot"). */
+  async restartAsShell(log) {
+    return this.restartAdbd('unroot:', /not running as root/i, 'Switching adb on the headset back to normal...', log);
+  }
+
+  async restartAdbd(service, alreadyDone, message, log) {
     const local = this.nextLocalId++;
     const device = this.device;
     const gone = waitForDisconnect(device);
-    await this.send(A_OPEN, local, 0, utf8.encode('root:\0'));
+    await this.send(A_OPEN, local, 0, utf8.encode(`${service}\0`));
     let reply = '';
     try {
       for (;;) {
@@ -243,9 +252,9 @@ class AdbUsb {
         }
       }
     } catch {} // adbd restarting drops the connection mid-reply
-    if (/already running as root/i.test(reply)) return true;
+    if (alreadyDone.test(reply)) return true;
     if (!/restarting/i.test(reply)) return false;
-    log('Restarting adb on the headset as root...');
+    log(message);
     await gone;
     await this.close();
     await sleep(1500);
@@ -414,14 +423,113 @@ export async function fixStuckWindow(adb, log) {
   await adb.shell(['am', 'force-stop', 'com.oculus.vrshell']);
 }
 
-/** The headset's system log, with the device, firmware and Steam Link version at the top. */
+// classes2.dex (our added class) of each patch the pages have shipped, to tell
+// from a log which one a headset runs.
+const PATCH_BUILDS = {
+  '98239a3dc7bfceda22244d09ed97322c9f00b7dc0b079712c083ec6b76f926c5': 'display 0 patch',
+  '29f20517b990d42465cf8d8a3db73cef1a10b055f205b9e782a17bbd821e1028': 'old test build (display 0 + cable address swap)',
+  '57f87fff38d994ddd20a8a51ed7a07c12b32e80ffd48d259dc328eae4b696238': 'old test build (display 0 + cable address swap with SteamVR check)',
+};
+
+// Checks that need no root.
+const INFO_SCRIPT = `
+section() { echo; echo "=== $1"; }
+section "Headset"
+echo "model: $(getprop ro.product.model) ($(getprop ro.product.device))"
+echo "firmware: $(getprop ro.build.version.incremental), $(getprop ro.build.display.id), Android $(getprop ro.build.version.release)"
+echo "fingerprint: $(getprop ro.build.fingerprint)"
+case "$(getprop ro.boot.flash.locked)" in 0) bl=yes;; 1) bl=no;; *) bl=unknown;; esac
+echo "bootloader unlocked: $bl"
+echo "date: $(date)"
+echo "uptime: $(uptime)"
+section "Steam Link app"
+dumpsys package ${PACKAGE} | grep -E "versionName|versionCode|firstInstallTime|lastUpdateTime" || echo "Steam Link is not installed"
+apk=$(pm path ${PACKAGE} | head -n 1 | cut -d: -f2)
+echo "apk: $apk"
+if [ -n "$apk" ]; then
+  if command -v unzip >/dev/null; then
+    unzip -l "$apk" | grep -E "META-INF/.*\\.(SF|RSA)|classes2" || echo "no classes2.dex: not patched by this project"
+    echo "classes2.dex sha256: $(unzip -p "$apk" classes2.dex 2>/dev/null | sha256sum | cut -d" " -f1)"
+  else
+    echo "unzip isn't available on this headset"
+  fi
+fi
+ls -lR /sdcard/Android/data/${PACKAGE} 2>&1 | head -n 40
+section "Wired streaming (checks without root)"
+pm list packages | grep -i magisk || echo "no Magisk app installed"
+echo "usb config: $(getprop sys.usb.config), state: $(getprop sys.usb.state)"
+ip addr show usb0 2>&1
+ip rule show | grep "^99:" || echo "no pref 99 routing rule"
+ps -A -o PID,USER,ARGS | grep -i udhcp | grep -v grep || echo "udhcpd not seen"
+section "Network"
+ip -4 addr | grep -E "^[0-9]|inet "
+dumpsys wifi | grep -E "^mWifiInfo|Link speed" | head -n 3
+section "Log buffers"
+logcat -g
+`;
+
+// Checks that need root (adb root): Magisk and the module's own state and log.
+const ROOT_SCRIPT = `
+section() { echo; echo "=== $1"; }
+section "Magisk and modules (as root)"
+echo "magisk: $(magisk -v 2>&1) ($(magisk -V 2>&1))"
+for m in /data/adb/modules/*; do
+  echo "$m: $(grep -E "^(version|versionCode)=" $m/module.prop | tr "\\n" " ")flags: $(ls $m | grep -E "^(disable|remove|update)$" | tr "\\n" " ")"
+done
+section "USB gadget (as root)"
+ls -l /config/usb_gadget/g1/configs/b.1
+echo "UDC: $(cat /config/usb_gadget/g1/UDC)"
+section "Module log, last 150 lines (as root)"
+tail -n 150 /data/adb/q1_steamlink_usb.log 2>&1
+`;
+
+const LOG_BUFFER = '16M';
+
+/**
+ * Everything needed to look into a problem: headset, firmware, which Steam
+ * Link build and patch, the wired-streaming module's state, and the system
+ * log (which holds Steam Link's connection log). Uses adb root for the
+ * module's details when the headset allows it, then switches back. Returns
+ * the text; log() gets a short summary.
+ */
 export async function headsetLog(adb, log) {
   log('Reading the headset log...');
-  const info = await adb.shell(['sh', '-c',
-    'echo "device: $(getprop ro.product.device), firmware: $(getprop ro.build.version.incremental)"; '
-    + `dumpsys package ${PACKAGE} | grep -E "versionName|lastUpdateTime" || echo "Steam Link not installed"`]);
-  const text = await adb.shell(['logcat', '-d']);
-  return `${info}\n\n${text}\n`;
+  // The system log first, before anything below adds to it.
+  const logcat = await adb.shell(['logcat', '-d', '-b', 'main,system,crash', '-v', 'threadtime']);
+  let info = await adb.shell(['sh', '-c', INFO_SCRIPT]);
+
+  const app = info.match(/versionName=(\S+)/);
+  const dex = info.match(/classes2\.dex sha256: ([0-9a-f]{64})/);
+  const patch = !dex ? 'not patched by this project, or unreadable' : PATCH_BUILDS[dex[1]] || 'unknown build of this project';
+  log(`Steam Link ${app ? app[1] : 'not installed'}; patch: ${patch}`);
+
+  let root = false;
+  try {
+    root = await adb.restartAsRoot(log);
+  } catch (e) {
+    // The connection is gone, but what's been read so far is still worth saving.
+    log(`Couldn't reconnect after restarting adb as root (${e.message}); saving what was read.`);
+    return `${info.trim()}\n\n=== adb root: reconnect failed: ${e.message}\n\n=== System log\n${logcat}\n`;
+  }
+  if (root) {
+    info += `\n${await adb.shell(['sh', '-c', ROOT_SCRIPT])}\n`;
+    const module = info.match(/q1_steamlink_usb: version=(\S+)/);
+    const flags = info.match(/q1_steamlink_usb: .*flags: (.*)/);
+    log(`Wired-streaming module: ${module ? `${module[1]} installed${flags && flags[1].trim() ? ` (${flags[1].trim()})` : ''}` : 'not installed'}`);
+    await adb.restartAsShell(log);
+  } else {
+    log('This headset doesn\'t allow adb root, so the log only has the module checks that work without it.');
+  }
+  log(/inet 10\.86\.13\.37/.test(info) ? 'USB network: up (10.86.13.37)' : 'USB network: not up');
+
+  const lines = logcat.split('\n');
+  const steamLink = lines.filter((l) => /steamlinkvr|SteamLink|VRLink/.test(l)).length;
+  log(`System log from ${(lines.find((l) => /^\d\d-\d\d /.test(l)) || '?').slice(0, 14)}, `
+    + `${lines.length} lines (${steamLink} from Steam Link).`);
+
+  // Bigger log for next time (default is small; lasts until the headset restarts).
+  await adb.shell(['logcat', '-G', LOG_BUFFER]).catch(() => {});
+  return `${info.trim()}\n\n=== System log (logcat -b main,system,crash)\n${logcat}\n`;
 }
 
 // --- Installing ----------------------------------------------------------------
@@ -451,6 +559,8 @@ export async function installApk(adb, apk, log, confirm) {
       out = await adb.shell(['pm', 'install', REMOTE_APK]);
     }
     if (!out.includes('Success')) throw new Error(`install failed: ${out}`);
+    // Bigger log until the headset restarts, so a saved log covers the first tries.
+    await adb.shell(['logcat', '-G', LOG_BUFFER]).catch(() => {});
     log('Installed. Open Steam Link from Unknown Sources in your app library.');
   } finally {
     await adb.shell(['rm', '-f', REMOTE_APK]).catch(() => {});

@@ -457,6 +457,87 @@ def patch_controller_config(data):
     return text.encode('utf-8')
 
 
+# The in-VR panels (preflight warnings, loading, dashboard) are web pages shown
+# in the system WebView. The Quest 1's is Chrome 74, which can't parse optional
+# chaining (Chrome 80+), so every script, including the shared ipc.js that
+# fills in the text and handles laser clicks, fails to load: blank panels with
+# dead buttons. Rewrite each `x?.y` as `(x == null ? {} : x).y`.
+WEBUI_JS = re.compile(r'^assets/webui/.+\.js$')
+OPTIONAL_CHAIN = re.compile(r'(?<=[\w$)\]])\?\.(?!\d)')
+
+
+def _receiver_start(text, end):
+    """Start of the member expression (a.b[c](d)...) that ends just before end."""
+    i = end
+    while i > 0:
+        c = text[i - 1]
+        if c in ')]':
+            depth = 0
+            while i > 0:
+                i -= 1
+                if text[i] in ')]':
+                    depth += 1
+                elif text[i] in '([':
+                    depth -= 1
+                    if depth == 0:
+                        break
+            if depth:
+                raise PatchError('webui: unbalanced brackets before ?.')
+        elif c.isalnum() or c in '_$.':
+            i -= 1
+        else:
+            break
+    return i
+
+
+# The scripts send messages back to libvrlink_scene.so, whose WebView thread
+# reads them off its Looper queue by poking at the WebView's own classes:
+# newer WebViews (obfuscated z5/U4/Z5) have the encoded message in a byte[]
+# field "a"; otherwise it expects msg.obj to be a Pair whose first has a String
+# field "b". On Chrome 74, Pair.first is the encoded byte[] itself, so that
+# lookup aborts the app (JNI "fid == null") as soon as the page sends anything,
+# e.g. a haptic when the laser touches a button. Patch the Pair branch to hand
+# Pair.first straight to the byte[] decoder.
+WEBVIEW_LIB = 'lib/arm64-v8a/libvrlink_scene.so'
+WEBVIEW_PAIR_BRANCH = bytes.fromhex(
+    '605e40f9'   # ldr x0, [x19, #0xb8]     env
+    'e10319aa'   # mov x1, x25              msg.obj (the Pair)
+    '620a40f9'   # ldr x2, [x19, #0x10]     Pair.first field id
+    '080040f9087d41f900013fd6'  # env->GetObjectField
+    'f90300aa'   # mov x25, x0              -> mov x26, x0
+    '605e40f9')  # ldr x0, [x19, #0xb8]     -> b <byte[] decoder>
+WEBVIEW_BYTES_DECODER = bytes.fromhex(
+    '605e40f9'   # ldr x0, [x19, #0xb8]
+    'e1031aaa'   # mov x1, x26              the byte[]
+    '080040f908ad42f900013fd6')  # env->GetArrayLength
+
+
+def patch_webview_lib(data):
+    """Returns the patched library, or None if Valve's code has changed."""
+    pair, dec = data.find(WEBVIEW_PAIR_BRANCH), data.find(WEBVIEW_BYTES_DECODER)
+    if (pair < 0 or dec < 0 or data.count(WEBVIEW_PAIR_BRANCH) != 1
+            or data.count(WEBVIEW_BYTES_DECODER) != 1 or not 0 < dec - (pair + 28) < 1 << 27):
+        return None
+    branch = 0x14000000 | (dec - (pair + 28)) // 4
+    patch = bytes.fromhex('fa0300aa') + struct.pack('<I', branch)  # mov x26, x0; b decoder
+    return data[:pair + 24] + patch + data[pair + 32:]
+
+
+def patch_webui_js(data):
+    text = data.decode('utf-8')
+    while True:
+        m = OPTIONAL_CHAIN.search(text)
+        if not m:
+            break
+        if text[m.end():m.end() + 1] == '(':
+            raise PatchError('webui: optional call x?.() is not supported')
+        start = _receiver_start(text, m.start())
+        recv = text[start:m.start()]
+        dot = '' if text[m.end():m.end() + 1] == '[' else '.'
+        text = f'{text[:start]}({recv} == null ? {{}} : {recv}){dot}{text[m.end():]}'
+    return text.encode('utf-8')
+
+
 # --- Signing (APK v1 / JAR signature, pure Python) ---------------------------------
 # META-INF/MANIFEST.MF, QUEST1.SF and QUEST1.RSA (PKCS #7 detached signature
 # over the .SF, SHA-256 with RSA). v1 is enough for the Quest 1 (Android 10).
@@ -643,6 +724,7 @@ def build_patched_apk(src_apk, out_dir, key):
         }
         for missing in set(patches) - set(names):
             raise PatchError(f'{missing} not found in the APK')
+        webview_lib = patch_webview_lib(z.read(WEBVIEW_LIB)) if WEBVIEW_LIB in names else None
         for info in z.infolist():
             name = info.filename
             if SIGNATURE_FILE.match(name) or name.endswith('/'):
@@ -650,9 +732,17 @@ def build_patched_apk(src_apk, out_dir, key):
             data = z.read(name)
             if name in patches:
                 data = patches[name](data)
+            elif webview_lib and name == WEBVIEW_LIB:
+                data = webview_lib
+            elif webview_lib and WEBUI_JS.match(name):
+                data = patch_webui_js(data)
             entries.append((name, data, info.compress_type == zipfile.ZIP_STORED))
     entries.append(('classes2.dex', CLASSES2_DEX, False))
     log('  headset and controllers: identify as Oculus Quest (Quest 1)')
+    if webview_lib:
+        log('  in-VR panels: made to work with the Quest 1 WebView')
+    else:
+        log('  in-VR panels: NOT patched (unknown libvrlink_scene.so); they stay blank')
 
     log('Signing...')
     out_dir.mkdir(parents=True, exist_ok=True)
