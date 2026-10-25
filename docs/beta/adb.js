@@ -401,6 +401,29 @@ export async function installMagiskModule(adb, zip, log) {
   return installed;
 }
 
+// --- Troubleshooting -----------------------------------------------------------
+
+/**
+ * Recover from the Quest 1 shell bug where a minimized 2D window won't come
+ * back (or comes back blank): close Steam Link and restart the shell, which
+ * the system relaunches by itself.
+ */
+export async function fixStuckWindow(adb, log) {
+  log('Closing Steam Link and restarting the headset menu...');
+  await adb.shell(['am', 'force-stop', PACKAGE]);
+  await adb.shell(['am', 'force-stop', 'com.oculus.vrshell']);
+}
+
+/** The headset's system log, with the device, firmware and Steam Link version at the top. */
+export async function headsetLog(adb, log) {
+  log('Reading the headset log...');
+  const info = await adb.shell(['sh', '-c',
+    'echo "device: $(getprop ro.product.device), firmware: $(getprop ro.build.version.incremental)"; '
+    + `dumpsys package ${PACKAGE} | grep -E "versionName|lastUpdateTime" || echo "Steam Link not installed"`]);
+  const text = await adb.shell(['logcat', '-d']);
+  return `${info}\n\n${text}\n`;
+}
+
 // --- Installing ----------------------------------------------------------------
 
 /** Check the device, push the APK and install it. confirm(message) -> bool. */

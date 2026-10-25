@@ -48,7 +48,7 @@
   #log, .log { background: var(--code); border-radius: 8px; padding: 10px 12px; min-height: 3em;
          font: 0.85rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
          white-space: pre-wrap; overflow-wrap: anywhere; }
-  #module-log { margin-top: 8px; } #module-log:empty { display: none; }
+  #module-log, #save-log-status, #fix-window-status { margin-top: 8px; } #module-log:empty, #save-log-status:empty, #fix-window-status:empty { display: none; }
   .ok { color: var(--ok); } .err { color: var(--err); }
   .beta { border-color: var(--accent); }
   .muted { color: var(--muted); font-size: 0.92rem; }
@@ -159,6 +159,21 @@
   </div>
 
   <div class="card">
+    <h2>Troubleshooting</h2>
+    <p><strong>Blank or missing Steam Link window:</strong> a Quest 1 system bug, mostly after minimizing
+      a window. Restart the headset, or use this button to close Steam Link and restart the headset's menu
+      (takes a few seconds), then open Steam Link again.</p>
+    <button id="fix-window">Connect and fix the window</button>
+    <div id="fix-window-status" class="log"></div>
+    <p><strong>Anything else:</strong> make the problem happen, then save the headset's log straight away,
+      before restarting the headset (a restart clears it). Attach the file to an issue.</p>
+    <p class="muted">The log can include your network names and addresses; look through it before posting it
+      publicly.</p>
+    <button id="save-log">Connect and save log</button>
+    <div id="save-log-status" class="log"></div>
+  </div>
+
+  <div class="card">
     <h2>What it changes</h2>
     <ul>
       <li><strong>Supported devices:</strong> the Quest 1 crashes on device names it doesn't know
@@ -180,8 +195,8 @@
       <ul>
         <li>Wired (USB) streaming needs a rooted headset with Magisk and the module above; stock headsets
           stream over Wi-Fi only.</li>
-        <li>A minimized 2D window sometimes won't come back (a Quest 1 system bug). Reboot the headset,
-          or run <code>adb shell am force-stop com.oculus.vrshell</code>.</li>
+        <li>A minimized 2D window sometimes won't come back or shows up blank (a Quest 1 system bug).
+          Restart the headset, or use "Connect and fix the window" under Troubleshooting.</li>
       </ul>
     </details>
   </div>
@@ -382,7 +397,62 @@ $('module-install').addEventListener('click', async () => {
   }
 });
 
-if (!navigator.usb) { $('browser-warning').hidden = false; $('module-install').disabled = true; }
+$('fix-window').addEventListener('click', async () => {
+  const flog = (msg, cls) => {
+    const line = document.createElement('div');
+    line.textContent = msg;
+    if (cls) line.className = cls;
+    $('fix-window-status').append(line);
+  };
+  $('fix-window-status').textContent = '';
+  $('fix-window').disabled = true;
+  let adb;
+  try {
+    const { connectHeadset, fixStuckWindow } = await import('./adb.js');
+    adb = await connectHeadset(flog);
+    await fixStuckWindow(adb, flog);
+    flog('Done. Wait a few seconds for the menu to come back, then open Steam Link again.', 'ok');
+  } catch (e) {
+    flog(`Error: ${e.message}`, 'err');
+    console.error(e);
+  } finally {
+    if (adb) await adb.close().catch(() => {});
+    $('fix-window').disabled = !navigator.usb;
+  }
+});
+
+$('save-log').addEventListener('click', async () => {
+  const slog = (msg, cls) => {
+    const line = document.createElement('div');
+    line.textContent = msg;
+    if (cls) line.className = cls;
+    $('save-log-status').append(line);
+  };
+  $('save-log-status').textContent = '';
+  $('save-log').disabled = true;
+  let adb;
+  try {
+    const { connectHeadset, headsetLog } = await import('./adb.js');
+    adb = await connectHeadset(slog);
+    const text = await headsetLog(adb, slog);
+    const name = `quest1-log-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')}.txt`;
+    const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+    Object.assign(document.createElement('a'), { href: url, download: name }).click();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    slog(`Saved ${name} (${Math.round(text.length / 1024)} KB) to your downloads.`, 'ok');
+  } catch (e) {
+    slog(`Error: ${e.message}`, 'err');
+    console.error(e);
+  } finally {
+    if (adb) await adb.close().catch(() => {});
+    $('save-log').disabled = !navigator.usb;
+  }
+});
+
+if (!navigator.usb) {
+  $('browser-warning').hidden = false; $('module-install').disabled = true; $('save-log').disabled = true;
+  $('fix-window').disabled = true;
+}
 </script>
 </body>
 </html>
