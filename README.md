@@ -7,6 +7,8 @@ headset, from a web page or a script.
 
 What you get:
 - PC VR streaming from SteamVR to a Quest 1 over Wi-Fi with Steam Link.
+- Optional wired streaming over USB, for rooted headsets with Magisk (see
+  [Wired streaming](#wired-streaming-rooted-headsets-only)).
 - SteamVR sees the headset as an "Oculus Quest" and shows genuine Quest 1
   Touch controllers.
 
@@ -16,7 +18,8 @@ too, including the script on Windows 11 and with a 90 Hz mod.
 
 Found a problem, or got it working on a setup not mentioned here?
 [Open an issue](../../issues) and include the script's output or the web
-page's log.
+page's log. For problems on the headset, save its log with the web page's
+"Connect and save log" button right after it happens.
 
 ## Before you start (web page or script)
 1. **Turn on developer mode** for the headset. You need a Meta developer
@@ -42,6 +45,9 @@ appear for yours in today's Horizon app, please
 Patches and installs from Chrome, Edge or another Chromium browser, with
 nothing to install: choose the APK from your SteamVR folder, patch, plug the
 headset in and install. Everything happens in your browser.
+
+The page can also install the wired-streaming module, fix a stuck Steam Link
+window, and save the headset's log for a bug report.
 
 The rest of this README covers the command-line script, which does the same
 on Linux/SteamOS and Windows.
@@ -85,19 +91,46 @@ script or the web page) and it just installs it.
 
 ## What it does
 1. Finds `android-steamlinkvr-release.apk` in your SteamVR install.
-2. Applies three patches. Valve's own code isn't modified; everything else
-   in the app is copied unchanged:
+2. Applies these patches. Apart from the in-VR panel fix, Valve's own code
+   isn't modified; everything else in the app is copied unchanged:
    - **Supported devices:** the Quest 1 crashes on device names it doesn't
      know ("Unknown device to support: quest3"), so the app's device list is
      cut down to names it knows.
    - **Display 0:** the Quest 1 leaves the VR part of the app on the 2D
-     window's hidden screen, so the stream never shows. A small extra class of
-     ours ([payload/SteamLinkQ1.smali](payload/SteamLinkQ1.smali), added as
-     `classes2.dex`) opens it on the main display instead.
+     window's hidden screen, so the stream never shows. A small extra class
+     added to the app ([payload/SteamLinkQ1.smali](payload/SteamLinkQ1.smali),
+     as `classes2.dex`) opens it on the main display instead.
    - **Quest 1 identity:** the headset and controllers identify as an Oculus
      Quest, so SteamVR shows the right controller models.
+   - **In-VR panels:** the warnings, loading and error panels inside VR are
+     small web pages, and the Quest 1's built-in browser is too old for their
+     scripts, so they showed up blank with buttons that didn't work. Their
+     scripts are rewritten to work on it, and a 5-byte fix in the app's native
+     library stops it crashing when a panel button is used. If a future Steam
+     Link changes that library, this fix is skipped and the output says so.
 3. Signs the app with the project's public key (see [Signing](#signing)), and
    installs it with adb, downloading adb first if you don't have it.
+
+## Wired streaming (rooted headsets only)
+The Quest 1 can't do Steam Link's wired mode by itself: its USB network mode
+is locked away. On a headset with an unlocked bootloader, root and
+**Magisk**, a small Magisk module from this project
+([magisk-module/](magisk-module/)) turns it on. Steam Link then streams over
+the cable with Wi-Fi as a backup, or over the cable alone with Wi-Fi off.
+Wireless streaming works without any of this.
+
+- Needs: an original Quest on its final firmware, bootloader unlocked (e.g.
+  with QuestStack, which **wipes the headset**), Magisk installed, and the
+  patched Steam Link.
+- Install it from the [web page](https://misteranderson91.github.io/quest1-steamlink-patcher/)
+  ("Copy to headset and install"), or download
+  [q1_steamlink_usb.zip](docs/q1_steamlink_usb.zip) and install it in the
+  Magisk app (Modules → Install from storage), then restart the headset.
+- Your PC needs no setup: the headset gives it an address on the cable
+  automatically (headset `10.86.13.37`, PC `10.86.13.38`). Tested streaming
+  from SteamOS; Windows should work (it has the USB network driver built in)
+  but is untested.
+- To remove it: Magisk app → Modules → remove, then restart.
 
 ## Signing
 Every patched APK, from the script or the web page, is signed with the same
@@ -120,12 +153,18 @@ script and page offer it), and then pairing with your PC again.
   uninstall it from the headset's app library.
 
 ## Known issues
-- **Wired (USB) streaming doesn't work.** The Quest 1 can't present the USB
-  network that Steam Link's wired mode needs. Use Wi-Fi.
-- **Minimizing the 2D window can leave it stuck.** On the Quest 1, a
+- **Wired (USB) streaming needs root.** Stock headsets can't present the USB
+  network that Steam Link's wired mode needs, so they stream over Wi-Fi only.
+  See [Wired streaming](#wired-streaming-rooted-headsets-only).
+- **Minimizing the 2D window can leave it stuck or blank.** On the Quest 1, a
   minimized panel sometimes won't come back. This is a bug in the Quest 1
-  system software (it also hits Meta's own panels). Reboot the headset, or
-  restart its shell with `adb shell am force-stop com.oculus.vrshell`.
+  system software (it also hits Meta's own panels). Restart the headset, use
+  "Connect and fix the window" on the web page, or run
+  `adb shell am force-stop com.oculus.vrshell`.
+- **Stuck on "Connecting", or a black screen with loading dots:** SteamVR on
+  the PC may be stuck from an earlier session. Quit SteamVR and connect
+  again; if it won't quit, restart the PC (on Linux, `pkill -9 vrserver`
+  also works).
 
 ## License
 MIT, see [LICENSE](LICENSE).
