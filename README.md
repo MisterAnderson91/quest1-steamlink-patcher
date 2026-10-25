@@ -37,7 +37,7 @@ page's log. For problems on the headset, save its log with the web page's
 
 Meta no longer supports the Quest 1. If the Developer Mode switch doesn't
 appear for yours in today's Horizon app, please
-[open an issue](../../issues) so we can document it.
+[open an issue](../../issues) so it can be documented.
 
 ## Easiest: the web page
 **https://misteranderson91.github.io/quest1-steamlink-patcher/**
