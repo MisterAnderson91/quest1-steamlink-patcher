@@ -84,7 +84,8 @@ script or the web page) and it just installs it.
   install (useful if Steam is somewhere unusual, or to patch on another
   computer). In SteamVR it's at
   `SteamVR/drivers/vrlink/resources/android-steamlinkvr-release.apk`.
-- `--connect HOST:PORT`: install over adb on Wi-Fi instead of USB.
+- `--connect HOST[:PORT]`: install over adb on Wi-Fi instead of USB (port
+  5555 if none is given).
 - `--key-pem FILE`: sign with your own key instead of the project's (a PEM
   file holding a PKCS #8 private key and its certificate).
 - `--help` lists everything.
@@ -149,6 +150,7 @@ script and page offer it), and then pairing with your PC again.
 - adb, if the script downloaded it: delete the cache folder.
   - Linux: `~/.cache/quest1-patcher/`
   - Windows: `%LOCALAPPDATA%\quest1-patcher\`
+  - macOS: `~/Library/Caches/quest1-patcher/`
 - The app on the headset: `adb uninstall com.valvesoftware.steamlinkvr`, or
   uninstall it from the headset's app library.
 

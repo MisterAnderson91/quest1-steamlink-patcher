@@ -157,15 +157,16 @@ class AdbUsb {
     const local = this.nextLocalId++;
     const command = args.map((a) => (/^[\w./:=-]+$/.test(a) ? a : `'${a.replace(/'/g, "'\\''")}'`)).join(' ');
     await this.send(A_OPEN, local, 0, utf8.encode(`shell:${command}\0`));
+    const decoder = new TextDecoder(); // its own: a character can be split across messages
     let output = '';
     for (;;) {
       const m = await this.readFor(local);
       if (m.command === A_WRTE) {
-        output += fromUtf8.decode(m.data, { stream: true });
+        output += decoder.decode(m.data, { stream: true });
         await this.send(A_OKAY, local, m.arg0);
       } else if (m.command === A_CLSE) {
         await this.send(A_CLSE, local, m.arg0);
-        return output.trim();
+        return (output + decoder.decode()).trim();
       }
     }
   }
@@ -374,14 +375,26 @@ const lastLines = (out) => out.split('\n').slice(-2).join(' ').trim() || 'no out
  * Copy the Magisk module to the headset's Download folder and install it as
  * root: first through "adb root" (headsets set up with
  * androidboot.adb.rootable=1; no prompt), else through Magisk's su (a prompt
- * in the headset). The copy in Download is deleted afterwards. Returns true if
- * installed.
+ * in the headset). The copy in Download is deleted afterwards, and adb is
+ * switched back from root. Returns true if installed.
  */
 export async function installMagiskModule(adb, zip, log) {
   const device = await adb.shell(['getprop', 'ro.product.device']);
   if (device !== 'monterey') throw new Error(`this device is "${device}"; the module is for the original Quest only`);
 
   const adbRoot = await adb.restartAsRoot(log);
+  try {
+    return await pushAndInstallModule(adb, adbRoot, zip, log);
+  } finally {
+    // Don't leave adb running as root on the headset.
+    if (adbRoot) {
+      await adb.restartAsShell(log).catch((e) => log(`Couldn't switch adb back from root (${e.message}); `
+        + 'it goes back to normal when the headset restarts.'));
+    }
+  }
+}
+
+async function pushAndInstallModule(adb, adbRoot, zip, log) {
   log(`Copying the module to the headset (${MODULE_DEST})...`);
   await adb.push(MODULE_DEST, zip);
 
@@ -516,7 +529,14 @@ export async function headsetLog(adb, log) {
     const module = info.match(/q1_steamlink_usb: version=(\S+)/);
     const flags = info.match(/q1_steamlink_usb: .*flags: (.*)/);
     log(`Wired-streaming module: ${module ? `${module[1]} installed${flags && flags[1].trim() ? ` (${flags[1].trim()})` : ''}` : 'not installed'}`);
-    await adb.restartAsShell(log);
+    try {
+      await adb.restartAsShell(log);
+    } catch (e) {
+      // The connection is gone, but everything has been read; adb stays root until the headset restarts.
+      log(`Couldn't switch adb back from root (${e.message}); saving the log anyway.`);
+      return `${info.trim()}\n\n=== adb unroot: reconnect failed: ${e.message}\n\n`
+        + `=== System log (logcat -b main,system,crash)\n${logcat}\n`;
+    }
   } else {
     log('This headset doesn\'t allow adb root, so the log only has the module checks that work without it.');
   }

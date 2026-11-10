@@ -42,7 +42,9 @@ function manifestLine(text) {
 
 /** Load the project's signing key: { keyPem, certPem }. */
 export async function loadProjectKey(url = 'signing-key.pem') {
-  return keyFromPem(await (await fetch(url)).text());
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`couldn't load ${url} (HTTP ${resp.status}); reload the page and try again`);
+  return keyFromPem(await resp.text());
 }
 
 export function keyFromPem(text) {
@@ -90,5 +92,7 @@ export async function signApk(entries, key) {
     'META-INF/QUEST1.RSA': [rsaBytes, { level: 6 }],
   };
   for (const e of entries) zipFiles[e.name] = [e.data, { level: e.store ? 0 : 6 }];
-  return zipSync(zipFiles, { mtime: new Date('2026-01-01T00:00:00Z') });
+  // Zip dates are written in local time: local midnight gives the same bytes in
+  // every time zone (and the same as quest1_patcher.py).
+  return zipSync(zipFiles, { mtime: new Date(2026, 0, 1) });
 }

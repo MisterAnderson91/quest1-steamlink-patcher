@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Gregory Anderson
 //
-// Patch Steam Link VR for the Quest 1 without touching Valve's code:
+// Patch Steam Link VR for the Quest 1:
 //   - manifest: cut com.oculus.supportedDevices down to names the Quest 1
 //     runtime knows, and point the launcher activity at our subclass
 //     com.valvesoftware.steamlink.SteamLinkQ1 (in classes2.dex), which
 //     starts the VR activity on display 0
 //   - assets/config: a Quest 1 headset entry and Quest 1 Touch controllers
+//   - in-VR panels: their scripts are rewritten for the Quest 1's old WebView,
+//     and a 5-byte fix in libvrlink_scene.so stops a crash when a
+//     panel sends a message (the only change to Valve's own code)
 // Everything else is copied byte-for-byte.
 
 import { unzipSync } from 'https://cdn.jsdelivr.net/npm/fflate@0.8.3/esm/browser.js';
@@ -216,18 +219,90 @@ function patchControllerConfig(bytes) {
 // in the system WebView. The Quest 1's is Chrome 74, which can't parse optional
 // chaining (Chrome 80+), so every script, including the shared ipc.js that
 // fills in the text and handles laser clicks, fails to load: blank panels with
-// dead buttons. Rewrite each `x?.y` as `(x == null ? {} : x).y`.
+// dead buttons. Rewrite each chain `x?.y.z()` as
+// `(x == null ? void 0 : x.y.z())`, which short-circuits the same way.
 const WEBUI_JS = /^assets\/webui\/.+\.js$/;
-const OPTIONAL_CHAIN = /(?<=[\w$)\]])\?\.(?!\d)/;
+const OPTIONAL_CHAIN = /\?\.(?![0-9])/g;
+// Other syntax Chrome 74 can't parse, which isn't rewritten (only reported).
+const TOO_NEW_JS = ['??', '||=', '&&='];
+const IDENT = /[A-Za-z0-9_$]/;
+const BEFORE_REGEX = '(,=:[!&|?{};+-*%<>~^';
+const isSpace = (c) => c !== undefined && /\s/.test(c);
 
-function receiverStart(text, end) {
+/** 1 for each character of text that is code; 0 inside strings, template
+ *  text, regex literals and comments. */
+function codeMask(text) {
+  const n = text.length;
+  const mask = new Uint8Array(n);
+  const depth = []; // per template being interpolated: open braces inside its ${ }
+  let prev = '';    // the last code character that isn't whitespace
+
+  // Skip template text; returns the index after its closing ` or after a ${
+  // (then noted in depth).
+  const template = (i) => {
+    while (i < n) {
+      if (text[i] === '\\') i += 2;
+      else if (text[i] === '`') return i + 1;
+      else if (text.startsWith('${', i)) { depth.push(0); return i + 2; }
+      else i++;
+    }
+    return n;
+  };
+
+  let i = 0;
+  while (i < n) {
+    const c = text[i];
+    if (text.startsWith('//', i)) {
+      const j = text.indexOf('\n', i);
+      i = j < 0 ? n : j;
+    } else if (text.startsWith('/*', i)) {
+      const j = text.indexOf('*/', i + 2);
+      i = j < 0 ? n : j + 2;
+    } else if (c === '"' || c === "'") {
+      i++;
+      while (i < n && text[i] !== c && text[i] !== '\n') i += text[i] === '\\' ? 2 : 1;
+      i++;
+      prev = c;
+    } else if (c === '`') {
+      i = template(i + 1);
+      prev = c;
+    } else if (c === '/' && (prev === '' || BEFORE_REGEX.includes(prev))) { // a regex, not a division
+      i++;
+      let inClass = false;
+      while (i < n && text[i] !== '\n' && (inClass || text[i] !== '/')) {
+        if (text[i] === '\\') i++;
+        else if (text[i] === '[') inClass = true;
+        else if (text[i] === ']') inClass = false;
+        i++;
+      }
+      i++;
+      prev = ')';
+    } else if (c === '}' && depth.length && depth[depth.length - 1] === 0) { // the end of a ${ }
+      depth.pop();
+      i = template(i + 1);
+      prev = '`';
+    } else {
+      if (depth.length && c === '{') depth[depth.length - 1]++;
+      else if (depth.length && c === '}') depth[depth.length - 1]--;
+      mask[i] = 1;
+      if (!isSpace(c)) prev = c;
+      i++;
+    }
+  }
+  return mask;
+}
+
+/** Start of the member expression (a.b[c](d)...) that ends just before end. */
+function receiverStart(text, mask, end) {
   let i = end;
   while (i > 0) {
     const c = text[i - 1];
+    if (!mask[i - 1]) break;
     if (c === ')' || c === ']') {
       let depth = 0;
       while (i > 0) {
         i--;
+        if (!mask[i]) continue;
         if (text[i] === ')' || text[i] === ']') depth++;
         else if (text[i] === '(' || text[i] === '[') {
           depth--;
@@ -235,10 +310,54 @@ function receiverStart(text, end) {
         }
       }
       if (depth) throw new PatchError('webui: unbalanced brackets before ?.');
-    } else if (/[\w$.]/.test(c)) {
+    } else if (IDENT.test(c) || c === '.') {
       i--;
+    } else if (isSpace(c)) { // a chain can go on after a line break, before or after the dot
+      let j = i - 1;
+      while (j > 0 && isSpace(text[j - 1])) j--;
+      if (j === 0 || !(text[i] === '.' || text[j - 1] === '.')) break;
+      i = j;
     } else {
       break;
+    }
+  }
+  if (text[i] === '.') throw new PatchError('webui: unsupported expression before ?.');
+  return i;
+}
+
+/** Is there a `.name` or `?.` (not `...`, not a ternary like `a?.5:b`) at i? */
+function isChainLink(text, i) {
+  if (text.startsWith('?.', i)) return !/[0-9]/.test(text[i + 2] || '');
+  return text[i] === '.' && text[i + 1] !== '.';
+}
+
+/** End of the rest of the chain (.b[c](d)?.e ...) that starts at i. */
+function chainEnd(text, mask, i) {
+  const n = text.length;
+  while (i < n) {
+    const c = text[i];
+    if (!mask[i]) break;
+    if (c === '(' || c === '[') {
+      let depth = 0;
+      while (i < n) {
+        if (mask[i] && (text[i] === '(' || text[i] === '[')) depth++;
+        else if (mask[i] && (text[i] === ')' || text[i] === ']')) {
+          depth--;
+          if (depth === 0) break;
+        }
+        i++;
+      }
+      if (depth) throw new PatchError('webui: unbalanced brackets after ?.');
+      i++;
+    } else if (IDENT.test(c)) {
+      i++;
+    } else if (isChainLink(text, i)) {
+      i += c === '?' ? 2 : 1;
+    } else {
+      let j = i;
+      while (j < n && isSpace(text[j])) j++;
+      if (j === i || !isChainLink(text, j)) break; // a chain can go on after a line break
+      i = j;
     }
   }
   return i;
@@ -285,7 +404,7 @@ function patchWebviewLib(data) {
   const dec = findAll(data, WEBVIEW_BYTES_DECODER);
   if (pair.length !== 1 || dec.length !== 1) return null;
   const distance = dec[0] - (pair[0] + 28);
-  if (!(distance > 0 && distance < 1 << 27)) return null;
+  if (pair[0] % 4 || dec[0] % 4 || !(distance > 0 && distance < 1 << 27)) return null;
   const out = data.slice();
   const view = new DataView(out.buffer);
   view.setUint32(pair[0] + 24, 0xaa0003fa, true);                  // mov x26, x0
@@ -293,17 +412,33 @@ function patchWebviewLib(data) {
   return out;
 }
 
+/** Returns { data: the rewritten script, tooNew: syntax in it that is still too new }. */
 function patchWebuiJs(bytes) {
   let text = fromUtf8.decode(bytes);
-  for (let m; (m = OPTIONAL_CHAIN.exec(text));) {
+  let mask;
+  for (;;) {
+    mask = codeMask(text);
+    let m;
+    let recvEnd;
+    OPTIONAL_CHAIN.lastIndex = 0;
+    while ((m = OPTIONAL_CHAIN.exec(text))) {
+      recvEnd = m.index;
+      while (recvEnd > 0 && isSpace(text[recvEnd - 1])) recvEnd--;
+      if (mask[m.index] && recvEnd > 0 && mask[recvEnd - 1] && /[A-Za-z0-9_$)\]]/.test(text[recvEnd - 1])) break;
+    }
+    if (!m) break;
     const after = m.index + 2;
-    if (text[after] === '(') throw new PatchError('webui: optional call x?.() is not supported');
-    const start = receiverStart(text, m.index);
-    const recv = text.slice(start, m.index);
-    const dot = text[after] === '[' ? '' : '.';
-    text = `${text.slice(0, start)}(${recv} == null ? {} : ${recv})${dot}${text.slice(after)}`;
+    const start = receiverStart(text, mask, recvEnd);
+    const end = chainEnd(text, mask, after);
+    const recv = text.slice(start, recvEnd);
+    const dot = text[after] === '(' || text[after] === '[' ? '' : '.';
+    text = `${text.slice(0, start)}(${recv} == null ? void 0 : ${recv}${dot}${text.slice(after, end)})${text.slice(end)}`;
   }
-  return utf8.encode(text);
+  const tooNew = TOO_NEW_JS.filter((tok) => {
+    for (let i = text.indexOf(tok); i >= 0; i = text.indexOf(tok, i + 1)) if (mask[i]) return true;
+    return false;
+  });
+  return { data: utf8.encode(text), tooNew };
 }
 
 // --- APK ---------------------------------------------------------------------
@@ -357,10 +492,20 @@ export function patchApk(apkBytes, classes2Dex, log = () => {}) {
   const webviewLib = files[WEBVIEW_LIB] && patchWebviewLib(files[WEBVIEW_LIB]);
   if (webviewLib) {
     patched[WEBVIEW_LIB] = webviewLib;
+    const tooNew = [];
     for (const name of Object.keys(files)) {
-      if (WEBUI_JS.test(name)) patched[name] = patchWebuiJs(files[name]);
+      if (!WEBUI_JS.test(name)) continue;
+      try {
+        const js = patchWebuiJs(files[name]);
+        patched[name] = js.data;
+        for (const tok of js.tooNew) tooNew.push([name, `uses "${tok}", which the Quest 1 WebView can't run`]);
+      } catch (e) {
+        if (!(e instanceof PatchError)) throw e;
+        tooNew.push([name, `was not rewritten (${e.message})`]);
+      }
     }
     log('in-VR panels: made to work with the Quest 1 WebView');
+    for (const [name, why] of tooNew) log(`in-VR panels: WARNING: ${name} ${why}; that panel may stay blank`);
   } else {
     log('in-VR panels: NOT patched (unknown libvrlink_scene.so); they stay blank');
   }

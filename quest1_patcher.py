@@ -5,7 +5,7 @@
 
 Takes the Steam Link APK from your own SteamVR install, patches it, signs it
 with the project's public key (so updates install in place), and installs it
-on the headset over adb. Valve's own code isn't modified:
+on the headset over adb:
 
   1. supported devices: the Quest 1 runtime aborts on device names it doesn't
      know ("Unknown device to support: quest3"), so the manifest's
@@ -17,6 +17,10 @@ on the headset over adb. Valve's own code isn't modified:
      display 0. The manifest's launcher activity is pointed at it.
   3. Quest 1 identity: SteamVR sees the headset as "Oculus Quest" and the
      controllers as Quest 1 Touch models, instead of "unknown" and Quest 2.
+  4. in-VR panels: the warning, loading and error panels are web pages whose
+     scripts the Quest 1's old WebView can't run. The scripts are rewritten,
+     and a 5-byte fix in libvrlink_scene.so stops a crash when a
+     panel sends a message. This is the only change to Valve's own code.
 
 Needs only Python 3.8+ (standard library). If adb isn't installed, it downloads
 Google's platform-tools into a cache folder, checking the published checksum.
@@ -461,20 +465,99 @@ def patch_controller_config(data):
 # in the system WebView. The Quest 1's is Chrome 74, which can't parse optional
 # chaining (Chrome 80+), so every script, including the shared ipc.js that
 # fills in the text and handles laser clicks, fails to load: blank panels with
-# dead buttons. Rewrite each `x?.y` as `(x == null ? {} : x).y`.
+# dead buttons. Rewrite each chain `x?.y.z()` as
+# `(x == null ? void 0 : x.y.z())`, which short-circuits the same way.
 WEBUI_JS = re.compile(r'^assets/webui/.+\.js$')
-OPTIONAL_CHAIN = re.compile(r'(?<=[\w$)\]])\?\.(?!\d)')
+OPTIONAL_CHAIN = re.compile(r'\?\.(?![0-9])')
+# Other syntax Chrome 74 can't parse, which isn't rewritten (only reported).
+TOO_NEW_JS = ('??', '||=', '&&=')
+_IDENT = frozenset('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$')
+_BEFORE_REGEX = frozenset('(,=:[!&|?{};+-*%<>~^')
 
 
-def _receiver_start(text, end):
+def _code_mask(text):
+    """1 for each character of text that is code; 0 inside strings, template
+    text, regex literals and comments."""
+    n = len(text)
+    mask = bytearray(n)
+    depth = []   # per template being interpolated: open braces inside its ${ }
+    prev = ''    # the last code character that isn't whitespace
+
+    def template(i):
+        """Skip template text; returns the index after its closing ` or
+        after a ${ (then noted in depth)."""
+        while i < n:
+            if text[i] == '\\':
+                i += 2
+            elif text[i] == '`':
+                return i + 1
+            elif text.startswith('${', i):
+                depth.append(0)
+                return i + 2
+            else:
+                i += 1
+        return n
+
+    i = 0
+    while i < n:
+        c = text[i]
+        if text.startswith('//', i):
+            j = text.find('\n', i)
+            i = n if j < 0 else j
+        elif text.startswith('/*', i):
+            j = text.find('*/', i + 2)
+            i = n if j < 0 else j + 2
+        elif c == '"' or c == "'":
+            i += 1
+            while i < n and text[i] != c and text[i] != '\n':
+                i += 2 if text[i] == '\\' else 1
+            i += 1
+            prev = c
+        elif c == '`':
+            i = template(i + 1)
+            prev = c
+        elif c == '/' and (prev == '' or prev in _BEFORE_REGEX):   # a regex, not a division
+            i += 1
+            in_class = False
+            while i < n and text[i] != '\n' and (in_class or text[i] != '/'):
+                if text[i] == '\\':
+                    i += 1
+                elif text[i] == '[':
+                    in_class = True
+                elif text[i] == ']':
+                    in_class = False
+                i += 1
+            i += 1
+            prev = ')'
+        elif c == '}' and depth and depth[-1] == 0:   # the end of a ${ }
+            depth.pop()
+            i = template(i + 1)
+            prev = '`'
+        else:
+            if depth and c == '{':
+                depth[-1] += 1
+            elif depth and c == '}':
+                depth[-1] -= 1
+            mask[i] = 1
+            if not c.isspace():
+                prev = c
+            i += 1
+    return mask
+
+
+def _receiver_start(text, mask, end):
     """Start of the member expression (a.b[c](d)...) that ends just before end."""
     i = end
     while i > 0:
         c = text[i - 1]
+        if not mask[i - 1]:
+            break
         if c in ')]':
             depth = 0
             while i > 0:
                 i -= 1
+                if not mask[i]:
+                    continue
                 if text[i] in ')]':
                     depth += 1
                 elif text[i] in '([':
@@ -483,10 +566,60 @@ def _receiver_start(text, end):
                         break
             if depth:
                 raise PatchError('webui: unbalanced brackets before ?.')
-        elif c.isalnum() or c in '_$.':
+        elif c in _IDENT or c == '.':
             i -= 1
+        elif c.isspace():   # a chain can go on after a line break, before or after the dot
+            j = i - 1
+            while j > 0 and text[j - 1].isspace():
+                j -= 1
+            if j == 0 or not (text[i:i + 1] == '.' or text[j - 1] == '.'):
+                break
+            i = j
         else:
             break
+    if text[i:i + 1] == '.':
+        raise PatchError('webui: unsupported expression before ?.')
+    return i
+
+
+def _is_chain_link(text, i):
+    """Is there a `.name` or `?.` (not `...`, not a ternary like `a?.5:b`) at i?"""
+    if text.startswith('?.', i):
+        return not text[i + 2:i + 3].isdigit()
+    return text[i:i + 1] == '.' and text[i + 1:i + 2] != '.'
+
+
+def _chain_end(text, mask, i):
+    """End of the rest of the chain (.b[c](d)?.e ...) that starts at i."""
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if not mask[i]:
+            break
+        if c in '([':
+            depth = 0
+            while i < n:
+                if mask[i] and text[i] in '([':
+                    depth += 1
+                elif mask[i] and text[i] in ')]':
+                    depth -= 1
+                    if depth == 0:
+                        break
+                i += 1
+            if depth:
+                raise PatchError('webui: unbalanced brackets after ?.')
+            i += 1
+        elif c in _IDENT:
+            i += 1
+        elif _is_chain_link(text, i):
+            i += 2 if c == '?' else 1
+        else:
+            j = i
+            while j < n and text[j].isspace():
+                j += 1
+            if j == i or not _is_chain_link(text, j):   # a chain can go on after a line break
+                break
+            i = j
     return i
 
 
@@ -516,7 +649,8 @@ def patch_webview_lib(data):
     """Returns the patched library, or None if Valve's code has changed."""
     pair, dec = data.find(WEBVIEW_PAIR_BRANCH), data.find(WEBVIEW_BYTES_DECODER)
     if (pair < 0 or dec < 0 or data.count(WEBVIEW_PAIR_BRANCH) != 1
-            or data.count(WEBVIEW_BYTES_DECODER) != 1 or not 0 < dec - (pair + 28) < 1 << 27):
+            or data.count(WEBVIEW_BYTES_DECODER) != 1 or pair % 4 or dec % 4
+            or not 0 < dec - (pair + 28) < 1 << 27):
         return None
     branch = 0x14000000 | (dec - (pair + 28)) // 4
     patch = bytes.fromhex('fa0300aa') + struct.pack('<I', branch)  # mov x26, x0; b decoder
@@ -524,18 +658,27 @@ def patch_webview_lib(data):
 
 
 def patch_webui_js(data):
+    """Returns (the rewritten script, the syntax in it that is still too new)."""
     text = data.decode('utf-8')
     while True:
-        m = OPTIONAL_CHAIN.search(text)
-        if not m:
+        mask = _code_mask(text)
+        for m in OPTIONAL_CHAIN.finditer(text):
+            recv_end = m.start()
+            while recv_end > 0 and text[recv_end - 1].isspace():
+                recv_end -= 1
+            if (mask[m.start()] and recv_end > 0 and mask[recv_end - 1]
+                    and (text[recv_end - 1] in _IDENT or text[recv_end - 1] in ')]')):
+                break
+        else:
             break
-        if text[m.end():m.end() + 1] == '(':
-            raise PatchError('webui: optional call x?.() is not supported')
-        start = _receiver_start(text, m.start())
-        recv = text[start:m.start()]
-        dot = '' if text[m.end():m.end() + 1] == '[' else '.'
-        text = f'{text[:start]}({recv} == null ? {{}} : {recv}){dot}{text[m.end():]}'
-    return text.encode('utf-8')
+        start = _receiver_start(text, mask, recv_end)
+        end = _chain_end(text, mask, m.end())
+        recv = text[start:recv_end]
+        dot = '' if text[m.end():m.end() + 1] in ('(', '[') else '.'
+        text = f'{text[:start]}({recv} == null ? void 0 : {recv}{dot}{text[m.end():end]}){text[end:]}'
+    too_new = [tok for tok in TOO_NEW_JS
+               if any(mask[i] for i in range(len(text)) if text.startswith(tok, i))]
+    return text.encode('utf-8'), too_new
 
 
 # --- Signing (APK v1 / JAR signature, pure Python) ---------------------------------
@@ -725,6 +868,7 @@ def build_patched_apk(src_apk, out_dir, key):
         for missing in set(patches) - set(names):
             raise PatchError(f'{missing} not found in the APK')
         webview_lib = patch_webview_lib(z.read(WEBVIEW_LIB)) if WEBVIEW_LIB in names else None
+        too_new = []
         for info in z.infolist():
             name = info.filename
             if SIGNATURE_FILE.match(name) or name.endswith('/'):
@@ -735,12 +879,18 @@ def build_patched_apk(src_apk, out_dir, key):
             elif webview_lib and name == WEBVIEW_LIB:
                 data = webview_lib
             elif webview_lib and WEBUI_JS.match(name):
-                data = patch_webui_js(data)
+                try:
+                    data, found = patch_webui_js(data)
+                    too_new += [(name, f'uses "{tok}", which the Quest 1 WebView can\'t run') for tok in found]
+                except PatchError as e:
+                    too_new.append((name, f'was not rewritten ({e})'))
             entries.append((name, data, info.compress_type == zipfile.ZIP_STORED))
     entries.append(('classes2.dex', CLASSES2_DEX, False))
     log('  headset and controllers: identify as Oculus Quest (Quest 1)')
     if webview_lib:
         log('  in-VR panels: made to work with the Quest 1 WebView')
+        for name, why in too_new:
+            log(f'  in-VR panels: WARNING: {name} {why}; that panel may stay blank')
     else:
         log('  in-VR panels: NOT patched (unknown libvrlink_scene.so); they stay blank')
 
@@ -781,6 +931,13 @@ def pick_device(adb, serial):
     return ready[0]
 
 
+def ask(question):
+    try:
+        return input(question).strip().lower()
+    except EOFError:   # no terminal to ask on
+        return ''
+
+
 def install(adb, serial, apk, assume_yes, force_device):
     a = [adb, '-s', serial]
     device = run(a + ['shell', 'getprop', 'ro.product.device']).strip()
@@ -797,7 +954,7 @@ def install(adb, serial, apk, assume_yes, force_device):
     if 'INSTALL_FAILED_UPDATE_INCOMPATIBLE' in output:
         log('The Steam Link already on the headset was signed with a different key, so it\n'
             'has to be uninstalled first. You will need to pair with your PC again.')
-        if not assume_yes and input('Uninstall it and continue? [y/N] ').strip().lower() != 'y':
+        if not assume_yes and ask('Uninstall it and continue? [y/N] ') != 'y':
             raise PatchError('not installed; the patched APK is still saved above')
         run(a + ['uninstall', PACKAGE])
         run(a + ['install', apk])
@@ -812,7 +969,7 @@ def main():
     p.add_argument('--output-dir', type=Path, default=Path.cwd(), help='where to save the patched APK')
     p.add_argument('--no-install', action='store_true', help="only build the APK, don't install it")
     p.add_argument('--serial', help='adb serial of the headset, if several devices are connected')
-    p.add_argument('--connect', metavar='HOST:PORT',
+    p.add_argument('--connect', metavar='HOST[:PORT]',
                    help='headset on adb over Wi-Fi (after `adb tcpip 5555`); implies --serial')
     p.add_argument('--yes', action='store_true', help="don't ask before uninstalling an old build")
     p.add_argument('--force-device', action='store_true', help='install even if the device is not a Quest 1')
@@ -822,6 +979,8 @@ def main():
     args = p.parse_args()
 
     try:
+        if args.key_pem and not args.key_pem.is_file():
+            raise PatchError(f'--key-pem: no such file: {args.key_pem}')
         key = (SigningKey.from_pem_text(args.key_pem.read_text()) if args.key_pem
                else SigningKey(SIGNING_KEY_PEM, SIGNING_CERT_PEM))
         apk = args.apk or find_steamvr_apk()
@@ -829,6 +988,8 @@ def main():
             raise PatchError("couldn't find SteamVR's Steam Link APK. Install SteamVR, or pass "
                              f'--apk (it is SteamVR/drivers/vrlink/resources/{APK_NAME}).')
         apk = Path(apk)
+        if not apk.is_file():
+            raise PatchError(f'--apk: no such file: {apk}')
         log(f'Using {apk}')
         version, already = inspect_apk(apk)
         if already:
@@ -840,14 +1001,20 @@ def main():
             return 0
         adb = find_adb()
         if args.connect:
-            log(run([adb, 'connect', args.connect]).strip())
-        install(adb, pick_device(adb, args.connect or args.serial), out, args.yes, args.force_device)
+            # adb lists the device as host:port, so add its default port if none was given
+            target = args.connect if ':' in args.connect else args.connect + ':5555'
+            log(run([adb, 'connect', target]).strip())
+            args.serial = target
+        install(adb, pick_device(adb, args.serial), out, args.yes, args.force_device)
         return 0
     except PatchError as e:
         print(f'Error: {e}', file=sys.stderr)
         return 1
     except urllib.error.URLError as e:
         print(f'Error: download failed: {e}', file=sys.stderr)
+        return 1
+    except OSError as e:
+        print(f'Error: {e}', file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         return 130

@@ -214,12 +214,18 @@
 
 <script src="https://cdn.jsdelivr.net/npm/node-forge@1.4.0/dist/forge.min.js"></script>
 <script type="module">
-import { patchApk, inspectApk } from './apkpatch.js?v=47258bfd9b';
-import { signApk, loadProjectKey } from './apksign.js?v=bb2b4c2e08';
+import { patchApk, inspectApk } from './apkpatch.js?v=95a0c6c5b9';
+import { signApk, loadProjectKey } from './apksign.js?v=0d8c051aa9';
 
 const $ = (id) => document.getElementById(id);
 const logEl = $('log');
 let patched = null; // { name, bytes }
+
+async function fetchBytes(url) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`couldn't load ${url.split('?')[0]} (HTTP ${resp.status}); reload the page and try again`);
+  return new Uint8Array(await resp.arrayBuffer());
+}
 
 function log(msg, cls) {
   const line = document.createElement('div');
@@ -333,7 +339,7 @@ $('patch').addEventListener('click', async () => {
   $('patch').disabled = $('install').disabled = $('download').disabled = true;
   try {
     const apk = new Uint8Array(await chosenFile.arrayBuffer());
-    const dex = new Uint8Array(await (await fetch('classes2.dex?v=98239a3dc7')).arrayBuffer());
+    const dex = await fetchBytes('classes2.dex?v=98239a3dc7');
     const { version, entries } = patchApk(apk, dex, log);
     log('Signing...');
     const bytes = await signApk(entries, await loadProjectKey());
@@ -360,7 +366,7 @@ $('install').addEventListener('click', async () => {
   $('install').disabled = true;
   let adb;
   try {
-    const { connectHeadset, installApk } = await import('./adb.js?v=3a77c6700e');
+    const { connectHeadset, installApk } = await import('./adb.js?v=c46199b1fc');
     adb = await connectHeadset(log);
     await installApk(adb, patched.bytes, (m) => log(m, m.startsWith('Installed') ? 'ok' : ''),
       async (msg) => window.confirm(msg));
@@ -384,8 +390,8 @@ $('module-install').addEventListener('click', async () => {
   $('module-install').disabled = true;
   let adb;
   try {
-    const zip = new Uint8Array(await (await fetch('q1_steamlink_usb.zip?v=8277b119eb')).arrayBuffer());
-    const { connectHeadset, installMagiskModule } = await import('./adb.js?v=3a77c6700e');
+    const zip = await fetchBytes('q1_steamlink_usb.zip?v=8277b119eb');
+    const { connectHeadset, installMagiskModule } = await import('./adb.js?v=c46199b1fc');
     adb = await connectHeadset(mlog);
     const ok = await installMagiskModule(adb, zip, (m) => mlog(m, m.startsWith('Installed') ? 'ok' : ''));
     if (!ok) mlog('Not installed: the module needs root and Magisk. With Magisk set up, you can also '
@@ -410,7 +416,7 @@ $('fix-window').addEventListener('click', async () => {
   $('fix-window').disabled = true;
   let adb;
   try {
-    const { connectHeadset, fixStuckWindow } = await import('./adb.js?v=3a77c6700e');
+    const { connectHeadset, fixStuckWindow } = await import('./adb.js?v=c46199b1fc');
     adb = await connectHeadset(flog);
     await fixStuckWindow(adb, flog);
     flog('Done. Wait a few seconds for the menu to come back, then open Steam Link again.', 'ok');
@@ -434,7 +440,7 @@ $('save-log').addEventListener('click', async () => {
   $('save-log').disabled = true;
   let adb;
   try {
-    const { connectHeadset, headsetLog } = await import('./adb.js?v=3a77c6700e');
+    const { connectHeadset, headsetLog } = await import('./adb.js?v=c46199b1fc');
     adb = await connectHeadset(slog);
     const text = await headsetLog(adb, slog);
     const name = `quest1-log-${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')}.txt`;
